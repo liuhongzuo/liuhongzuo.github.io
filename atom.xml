@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
     <id>https://liuhongzuo.github.io</id>
-    <title>lhz</title>
-    <updated>2020-02-12T10:21:37.285Z</updated>
+    <title>一枝会思想的芦苇的博客</title>
+    <updated>2020-02-12T10:28:44.253Z</updated>
     <generator>https://github.com/jpmonette/feed</generator>
     <link rel="alternate" href="https://liuhongzuo.github.io"/>
     <link rel="self" href="https://liuhongzuo.github.io/atom.xml"/>
-    <subtitle>一枝会思想的芦苇的博客</subtitle>
     <logo>https://liuhongzuo.github.io/images/avatar.png</logo>
     <icon>https://liuhongzuo.github.io/favicon.ico</icon>
-    <rights>All rights reserved 2020, lhz</rights>
+    <rights>All rights reserved 2020, 一枝会思想的芦苇的博客</rights>
     <entry>
         <title type="html"><![CDATA[刘虹佐博客]]></title>
         <id>https://liuhongzuo.github.io/post/liu-hong-zuo-bo-ke</id>
