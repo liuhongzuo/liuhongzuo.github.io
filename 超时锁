@@ -1,0 +1,28 @@
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <chrono>
+
+std::mutex mtx;
+
+void try_lock_with_timeout() {
+    std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+
+    if (lock.try_lock_for(std::chrono::milliseconds(100))) {
+        std::cout << "Lock acquired!" << std::endl;
+        // 处理临界区代码
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));  // 模拟工作
+    } else {
+        std::cout << "Failed to acquire lock within timeout!" << std::endl;
+    }
+}
+
+int main() {
+    std::thread t1(try_lock_with_timeout);
+    std::thread t2(try_lock_with_timeout);
+
+    t1.join();
+    t2.join();
+
+    return 0;
+}
