@@ -1,0 +1,74 @@
+import subprocess
+import re
+import time
+import logging
+
+# 配置日志记录
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger()
+
+# 配置命令（根据实际需求修改）
+COMMAND_TO_EXECUTE = "free -m"  # 示例命令：获取内存信息
+COMMAND_TO_TRIGGER = "echo 'Alert! Value exceeds threshold'"  # 示例命令：触发警报
+
+def extract_number(output):
+    """从命令输出中提取第一个数字"""
+    # 使用正则表达式查找所有整数
+    numbers = re.findall(r'\b\d+\b', output)
+    return int(numbers[0]) if numbers else None
+
+def execute_command(command):
+    """执行命令并返回输出"""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        logger.error(f"Command failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("Command timed out")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+    return None
+
+def main():
+    logger.info("Starting monitoring script...")
+    logger.info(f"Monitoring command: {COMMAND_TO_EXECUTE}")
+    logger.info(f"Trigger command: {COMMAND_TO_TRIGGER}")
+    
+    try:
+        while True:
+            # 执行主命令
+            output = execute_command(COMMAND_TO_EXECUTE)
+            
+            if output:
+                # 提取数字并检查阈值
+                number = extract_number(output)
+                if number is not None:
+                    logger.info(f"Extracted value: {number}")
+                    if number > 1000:
+                        logger.warning(f"Value {number} exceeds threshold!")
+                        # 执行触发命令
+                        trigger_result = execute_command(COMMAND_TO_TRIGGER)
+                        if trigger_result:
+                            logger.info(f"Trigger command output: {trigger_result}")
+                else:
+                    logger.warning("No numeric value found in command output")
+            
+            # 等待10秒
+            time.sleep(10)
+    
+    except KeyboardInterrupt:
+        logger.info("Script terminated by user")
+
+if __name__ == "__main__":
+    main()
