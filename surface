@@ -1,0 +1,49 @@
+import subprocess
+import re
+import time
+import sys
+
+def run_adb_command(command):
+    """执行ADB命令并返回输出结果"""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            text=True,
+            capture_output=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"命令执行失败: {e.stderr}")
+        sys.exit(1)
+
+def extract_visible_layers(output):
+    """从命令输出中提取Visible layers数值"""
+    pattern = r"Visible layers:\s*(\d+)"
+    match = re.search(pattern, output)
+    if match:
+        return int(match.group(1))
+    return 0
+
+def main():
+    print("开始SurfaceFlinger监控，每30分钟检查一次...")
+    while True:
+        # 执行dumpsys命令并提取图层数量
+        output = run_adb_command("adb shell dumpsys SurfaceFlinger")
+        layer_count = extract_visible_layers(output)
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{current_time}] Visible layers: {layer_count}")
+        
+        # 检查图层数量是否超过阈值
+        if layer_count > 1000:
+            print(f"警告：Visible layers超过阈值({layer_count}>1000)，触发bugreport...")
+            run_adb_command("adb bugreport")
+            print("bugreport已生成，程序退出")
+            sys.exit(0)
+        
+        # 等待30分钟（1800秒）
+        time.sleep(1800)
+
+if __name__ == "__main__":
+    main()
