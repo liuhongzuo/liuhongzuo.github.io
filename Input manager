@@ -1,0 +1,48 @@
+[package]
+name = "input_parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quick-xml = "0.31"
+serde = { version = "1.0", features = ["derive"] }
+serde_derive = "1.0"
+
+use quick_xml::de::from_str;
+use serde::Deserialize;
+use std::fs;
+
+#[derive(Debug, Deserialize)]
+struct InputDevices {
+    #[serde(rename = "inputdevice")]
+    devices: Vec<InputDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InputDevice {
+    #[serde(rename = "@vm")]
+    vm: u32,
+    #[serde(rename = "@socket")]
+    socket: String,
+    #[serde(rename = "@evdev")]
+    evdev: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. 读取 XML 文件
+    let xml_content = fs::read_to_string("input-devices.xml")?;
+
+    // 2. 解析 XML -> 结构体
+    let input_devices: InputDevices = from_str(&xml_content)?;
+
+    // 3. 打印结果
+    println!("解析到 {} 个 inputdevice:", input_devices.devices.len());
+    for device in input_devices.devices {
+        println!(
+            "vm: {}, socket: {}, evdev: {}",
+            device.vm, device.socket, device.evdev
+        );
+    }
+
+    Ok(())
+}
