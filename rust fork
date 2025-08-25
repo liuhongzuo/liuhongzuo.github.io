@@ -120,3 +120,20 @@ fn main() {
         thread::sleep(Duration::from_secs(1));
     }
 }
+
+
+
+use std::process::Command;
+
+fn main() {
+    let program = "/usr/bin/top";
+    let args = ["-b"];
+
+    let child = Command::new(program)
+        .args(&args)
+        .spawn()
+        .expect("启动子进程失败");
+
+    println!("子进程 PID: {}", child.id());
+}
+
