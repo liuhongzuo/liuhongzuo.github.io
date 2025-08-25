@@ -1,0 +1,122 @@
+use std::process::{Command, Child};
+use std::collections::HashMap;
+use std::thread;
+use std::time::Duration;
+use log::{info, error};
+use chrono::Local;
+
+/// 单个进程的配置信息
+#[derive(Debug, Clone)]
+struct ProcessConfig {
+    name: String,
+    program: String,
+    args: Vec<String>,
+    max_restarts: u32, // 最大重启次数，0 表示无限重启
+}
+
+/// 用于管理每个进程的状态
+struct ProcessState {
+    config: ProcessConfig,
+    restart_count: u32,
+}
+
+/// 启动一个子进程
+fn start_child(config: &ProcessConfig) -> std::io::Result<Child> {
+    info!(
+        "[{}] 启动进程: {} {:?}",
+        config.name, config.program, config.args
+    );
+
+    Command::new(&config.program)
+        .args(&config.args)
+        .spawn()
+}
+
+fn main() {
+    // 初始化日志
+    env_logger::init();
+
+    // 配置多个被监控的进程
+    let processes = vec![
+        ProcessConfig {
+            name: "sleep5".to_string(),
+            program: "/usr/bin/sleep".to_string(),
+            args: vec!["5".to_string()],
+            max_restarts: 3,
+        },
+        ProcessConfig {
+            name: "echo".to_string(),
+            program: "/usr/bin/echo".to_string(),
+            args: vec!["Hello".to_string(), "Rust".to_string()],
+            max_restarts: 0, // 无限重启
+        },
+    ];
+
+    // 用于存储每个进程的状态
+    let mut process_states: HashMap<String, ProcessState> = HashMap::new();
+
+    for config in processes {
+        process_states.insert(
+            config.name.clone(),
+            ProcessState {
+                config,
+                restart_count: 0,
+            },
+        );
+    }
+
+    loop {
+        for (name, state) in process_states.iter_mut() {
+            // 如果重启次数超过限制，就跳过
+            if state.config.max_restarts > 0 && state.restart_count >= state.config.max_restarts {
+                error!(
+                    "[{}] 已达到最大重启次数 ({})，不再重启",
+                    name, state.config.max_restarts
+                );
+                continue;
+            }
+
+            // 启动子进程
+            match start_child(&state.config) {
+                Ok(mut child) => {
+                    info!(
+                        "[{}] 子进程已启动，PID = {}",
+                        name,
+                        child.id()
+                    );
+
+                    // 等待子进程退出
+                    match child.wait() {
+                        Ok(status) => {
+                            if status.success() {
+                                info!("[{}] 子进程正常退出", name);
+                            } else {
+                                error!(
+                                    "[{}] 子进程异常退出，退出码 = {:?}",
+                                    name,
+                                    status.code()
+                                );
+                                state.restart_count += 1;
+                                info!(
+                                    "[{}] 2 秒后尝试第 {} 次重启...",
+                                    name, state.restart_count
+                                );
+                                thread::sleep(Duration::from_secs(2));
+                            }
+                        }
+                        Err(e) => {
+                            error!("[{}] 等待子进程失败: {}", name, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("[{}] 启动失败: {}", name, e);
+                    state.restart_count += 1;
+                }
+            }
+        }
+
+        // 每次轮询间隔 1 秒
+        thread::sleep(Duration::from_secs(1));
+    }
+}
