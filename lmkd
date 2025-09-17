@@ -1,0 +1,112 @@
+LMKD（Low Memory Killer Daemon）是 Android 上内存压力处理的关键用户态守护进程，它替代了老的内核 lowmemorykiller 驱动。在内存紧张时，LMKD 会根据 多种策略来决定杀掉哪个进程，核心是 进程优先级（OOM adj/score） + 内存回收效果。
+
+下面分层次说明：
+
+
+---
+
+1. 触发条件
+
+LMKD 通过 psi（pressure stall information）监控内存压力。当系统出现：
+
+内存不足（free memory 过低，或 page reclaim 压力过大）
+
+swap 使用接近上限（如果启用了 zram/swap）
+
+进程分配内存失败（oom-kill trigger）
+
+
+时，LMKD 会被唤醒尝试杀掉进程。
+
+
+---
+
+2. 进程优先级依据
+
+核心是 oom_adj / oom_score_adj。
+
+每个进程在 ActivityManagerService（AMS）中都有一个 adj 值，反映其重要性。
+
+adj 值越低，进程越重要；adj 值越高，越容易被杀。
+
+前台 app、前台服务：oom_adj 最低（一般 ≤ 0，不会轻易杀）。
+
+后台 app、缓存进程：oom_adj 较高（> 0，最先被考虑杀）。
+
+
+LMKD 会优先从 adj 高的进程中选择。
+
+
+
+---
+
+3. 选择具体进程的策略
+
+在同一优先级组内，LMKD 会进一步考虑：
+
+1. RSS（常驻内存大小）
+
+杀掉能释放更多内存的进程优先。
+
+默认策略是“最大化回收”：同等重要性下，挑选占用内存最多的。
+
+
+
+2. Kill Reason
+
+Pressure-based kill：当系统持续卡顿，LMKD 会定期杀掉内存大的后台进程，降低压力。
+
+OOM kill：当分配内存失败时，会直接选取最合适的目标进程。
+
+
+
+3. 额外因素
+
+如果 某些进程被 AMS 标记为 protected/不可杀，LMKD 会跳过。
+
+可能结合 kill timeout，避免频繁杀同一个进程。
+
+
+
+
+
+---
+
+4. 杀进程的流程
+
+LMKD 根据策略选中目标进程。
+
+通过 kill(SIGKILL) 终止该进程。
+
+AMS 收到通知后会更新进程状态，调度其它进程接管。
+
+
+
+---
+
+5. 总结
+
+LMKD 杀进程的核心策略：
+
+1. 优先级（oom_adj/oom_score_adj） → 决定杀谁的顺序
+
+
+2. 常驻内存大小（RSS） → 同优先级下挑大户
+
+
+3. 结合内存压力来源（psi / OOM / swap 等） → 决定是否立刻杀
+
+
+
+公式化理解：
+
+目标进程 = max(RSS) among {进程 | adj = max(adj 值)}
+
+也就是说：尽量杀掉最不重要、最占内存的进程。
+
+
+---
+
+要不要我帮你把 LMKD 的源码 kill 策略路径（比如 system/memory/lmkd/lmkd.c 中的逻辑）梳理出来，这样你能直接对应到代码里？
+
+
