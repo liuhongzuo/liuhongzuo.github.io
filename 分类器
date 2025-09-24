@@ -1,0 +1,99 @@
+明白啦 👍。你想要比较两种典型方案：
+
+1. 冻结 embedding + 非神经网络分类器
+
+
+2. embedding + 分类头（神经网络）联合训练
+
+
+
+这两条路线都可以做，下面我给你推荐合适的分类器👇
+
+
+---
+
+🔹 方案一：冻结 embedding + 非神经网络分类器
+
+在这里，CodeBERT 只负责生成 固定 embedding，分类任务交给传统 ML 分类器完成。适合你 500 条数据的小样本场景。
+
+推荐分类器
+
+1. SVM (Support Vector Machine)
+
+优点：小样本下泛化好，不容易过拟合。
+
+推荐核函数：线性核 (kernel="linear")，因为 embedding 维度高（768+），线性分割通常够用。
+
+缺点：不能反向更新 embedding。
+
+
+
+2. Logistic Regression
+
+本质上是一个线性分类器（和 softmax 分类头差不多）。
+
+优点：训练速度快，结果可解释性好。
+
+缺点：如果类别边界复杂，可能比 SVM 稍弱。
+
+
+
+
+👉 总结：冻结 embedding 时，推荐 SVM 优先，Logistic Regression 作为 baseline。
+
+
+---
+
+🔹 方案二：embedding + 分类头联合训练
+
+在这里，CodeBERT + 分类头一起组成端到端网络，loss 可以反向更新 embedding 和分类头参数。
+
+推荐分类头
+
+1. Linear Layer + Softmax
+
+logits = Linear(hidden_size, num_labels)
+probs = Softmax(logits)
+
+优点：参数少，不容易过拟合。
+
+推荐场景：小数据集（你 500 条数据）。
+
+
+
+2. 小型 MLP（带 Dropout）
+
+x = Linear(hidden_size, 256)
+x = ReLU(x)
+x = Dropout(0.1)
+logits = Linear(256, num_labels)
+
+优点：增加非线性表达能力。
+
+缺点：数据太少时，过拟合风险大。
+
+
+
+
+👉 总结：联合训练时，先用 Linear + Softmax，如果效果不好再尝试小型 MLP。
+
+
+---
+
+✅ 最终推荐对比实验
+
+冻结 embedding → 用 SVM 和 Logistic Regression
+
+联合训练 → 用 Linear Head 和 小型 MLP Head
+
+
+这样你就能比较：
+
+固定 embedding 的效果（非神经网络分类器） vs 端到端微调 embedding 的效果（神经网络分类头）。
+
+
+
+---
+
+要不要我帮你整理一个 实验对比表格（不同分类器、超参数、可能效果），这样你能直接规划实验路线？
+
