@@ -70,3 +70,24 @@ probs = softmax(logits) # 转换为概率
 pred_id = np.argmax(probs) # 获取概率最大的类别ID
 
 print(f"推理完成! 预测类别 ID: {pred_id}, 置信度: {probs[0][pred_id]:.4f}")
+
+
+
+import json
+
+# 读取 config.json
+with open("beit_config/config.json", "r") as f:
+    config = json.load(f)
+
+# 获取 id2label 字典
+# 注意：JSON里的 key 通常是字符串 "0", "1"，所以查找时要把整数转字符串
+id2label = config.get("id2label", {})
+
+pred_id = 281
+
+# 查找
+predicted_label = id2label.get(str(pred_id), "未知类别")
+
+print(f"ID: {pred_id} -> 类别: {predicted_label}")
+
+
