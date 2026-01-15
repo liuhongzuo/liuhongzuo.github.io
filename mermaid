@@ -1,0 +1,13 @@
+graph TD
+    A[Raw Text: "The meeting..."] --> B(文本清洗与归一化)
+    B --> C[Normalized: "...two thirty p m..."]
+    C --> D(G2P 字素转音素 - espeak-ng)
+    D --> E[Phonemes: ð ə m iː t ɪ ŋ...]
+    E --> F(ID 映射 & Interspersing)
+    F --> G[Input Tensor: 1, 0, 15, 0, 22...]
+    G --> H{ONNX Model Inference}
+    I[Scales: 0.667, 1.0, 0.8] --> H
+    J[Lengths: 85] --> H
+    H --> K[Output Tensor: Float32 array]
+    K --> L(音频反归一化 & Int16转换)
+    L --> M[WAV Audio: Byte Stream]
