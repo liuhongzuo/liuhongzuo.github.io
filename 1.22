@@ -1,6 +1,5 @@
 import json
 import numpy as np
-import onnxruntime as ort
 import piper_phonemize
 
 class PiperPreprocessor:
@@ -12,15 +11,14 @@ class PiperPreprocessor:
         self.espeak_voice = self.config['espeak']['voice']
         
         # 获取特殊 Token ID
-        # Piper 中 Pad 默认为 '_', ID 通常是 0
+        # 通常 Pad=0, BOS=1, EOS=2, 但以 config 为准
         self.pad_id = self.phoneme_id_map.get('_', [0])[0]
         self.bos_id = self.phoneme_id_map.get('^', [1])[0]
         self.eos_id = self.phoneme_id_map.get('$', [2])[0]
 
     def intersperse(self, lst, item):
         """
-        在列表的每个元素中间插入 item (Pad ID)
-        例如: [1, 2, 3] -> [1, 0, 2, 0, 3]
+        基础插入: [A, B, C] -> [A, 0, B, 0, C]
         """
         if not lst:
             return []
@@ -28,38 +26,50 @@ class PiperPreprocessor:
         result[0::2] = lst
         return result
 
-    def text_to_ids(self, text, use_intersperse=True):
-        """将文本转换为音素 ID 列表，并根据需要插入 Pad"""
-        # 1. 文本转音素
+    def text_to_ids(self, text):
+        """
+        将文本转换为 ID 序列
+        最终格式: [BOS, Pad, P1, Pad, P2, Pad, EOS]
+        """
+        # 1. 文本转音素 (List of List)
         phonemes_list = piper_phonemize.phonemize_espeak(
             text, self.espeak_voice
         )
         
+        # 展平
         phonemes = []
         for p in phonemes_list:
             phonemes.extend(p)
 
         # 2. 音素转 ID
-        # 注意：先转 ID 列表，再处理 BOS/EOS 和 Pad
         phoneme_ids = []
         for phoneme in phonemes:
             if phoneme in self.phoneme_id_map:
                 phoneme_ids.extend(self.phoneme_id_map[phoneme])
-            else:
-                print(f"Warning: Skipping unknown phoneme '{phoneme}'")
-        
-        # 3. 插入 Pad (Intersperse)
-        # 这一步非常关键：通常是在 BOS 和 EOS 之间插入带 Pad 的序列
-        if use_intersperse:
-            phoneme_ids = self.intersperse(phoneme_ids, self.pad_id)
+            # 可以在这里处理未知音素的逻辑
 
-        # 4. 构建最终序列： BOS + [Pads...] + EOS
-        sequence = [self.bos_id] + phoneme_ids + [self.eos_id]
+        # 3. 构建序列
+        if not phoneme_ids:
+            # 如果是空文本，至少返回 [BOS, EOS] 或 [BOS, Pad, EOS]
+            return [self.bos_id, self.pad_id, self.eos_id]
+
+        # 步骤 A: 先做基础插入 [P1, 0, P2]
+        interspersed_ids = self.intersperse(phoneme_ids, self.pad_id)
+        
+        # 步骤 B: 在 BOS 后和 EOS 前强制补充 Pad
+        # 逻辑: [BOS] + [Pad] + [P1, 0, P2] + [Pad] + [EOS]
+        sequence = (
+            [self.bos_id] + 
+            [self.pad_id] + 
+            interspersed_ids + 
+            [self.pad_id] + 
+            [self.eos_id]
+        )
         
         return sequence
 
     def prepare_tensor(self, text, speaker_id=0):
-        sequence = self.text_to_ids(text, use_intersperse=True)
+        sequence = self.text_to_ids(text)
         
         input_tensor = np.array([sequence], dtype=np.int64)
         input_lengths = np.array([len(sequence)], dtype=np.int64)
@@ -78,26 +88,36 @@ class PiperPreprocessor:
             
         return inputs
 
-# --- 测试部分 ---
+# --- 验证逻辑 ---
 if __name__ == "__main__":
-    # 替换你的模型路径
-    model_path = "en_US-lessac-medium.onnx"
-    config_path = "en_US-lessac-medium.onnx.json"
+    # 模拟 Config 结构 (如果没有真实文件，用这个测试)
+    # 实际使用时请传入真实 json 路径
+    mock_config = {
+        "phoneme_id_map": {"^": [1], "$": [2], "_": [0], "a": [3], "b": [4]},
+        "espeak": {"voice": "en-us"},
+        "num_speakers": 1
+    }
     
-    text = "Piper is awesome"
+    # 为了演示，我们 mock 一个类实例
+    print("--- 正在进行结构验证 ---")
+    preprocessor = PiperPreprocessor("en_US-lessac-medium.onnx.json") # 替换为你的真实文件
     
-    try:
-        preprocessor = PiperPreprocessor(config_path)
-        tensor_inputs = preprocessor.prepare_tensor(text)
-        
-        print(f"生成的 ID 序列: {tensor_inputs['input'][0]}")
-        print(f"序列长度: {tensor_inputs['input_lengths']}")
-        
-        # 验证 Pad 是否插入成功 (假设 Pad ID 为 0)
-        ids = tensor_inputs['input'][0]
-        # 跳过 BOS(首) 和 EOS(尾)，检查中间是否隔一个就是一个 0
-        is_interspersed = all(x == 0 for x in ids[2:-1:2])
-        print(f"Pad (ID=0) 插入检查: {'成功' if is_interspersed else '失败'}")
-
-    except Exception as e:
-        print(f"Error: {e}")
+    # 假设输入文本对应的音素 ID 是 [10, 11] (两个音素)
+    # 我们期望看到: [1, 0, 10, 0, 11, 0, 2] (长度 7)
+    
+    # 这里我们直接打印 text_to_ids 的结果
+    text = "Hello" # 假设 Hello 被转为若干音素
+    ids = preprocessor.text_to_ids(text)
+    
+    print(f"生成的 ID 序列: {ids}")
+    
+    # 检查 BOS 后是否是 Pad
+    check_start = (ids[0] == preprocessor.bos_id and ids[1] == preprocessor.pad_id)
+    # 检查 EOS 前是否是 Pad
+    check_end = (ids[-1] == preprocessor.eos_id and ids[-2] == preprocessor.pad_id)
+    
+    print(f"BOS 后有 Pad? {check_start}")
+    print(f"EOS 前有 Pad? {check_end}")
+    
+    if check_start and check_end:
+        print
