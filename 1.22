@@ -10,71 +10,40 @@ class PiperPreprocessor:
         self.phoneme_id_map = self.config['phoneme_id_map']
         self.espeak_voice = self.config['espeak']['voice']
         
-        # 获取特殊 Token ID
-        # 通常 Pad=0, BOS=1, EOS=2, 但以 config 为准
         self.pad_id = self.phoneme_id_map.get('_', [0])[0]
         self.bos_id = self.phoneme_id_map.get('^', [1])[0]
         self.eos_id = self.phoneme_id_map.get('$', [2])[0]
 
     def intersperse(self, lst, item):
-        """
-        基础插入: [A, B, C] -> [A, 0, B, 0, C]
-        """
-        if not lst:
-            return []
+        if not lst: return []
         result = [item] * (len(lst) * 2 - 1)
         result[0::2] = lst
         return result
 
-    def text_to_ids(self, text):
+    def get_phonemes_batch(self, text):
         """
-        将文本转换为 ID 序列
-        最终格式: [BOS, Pad, P1, Pad, P2, Pad, EOS]
+        核心修改：直接返回 piper-phonemize 的原始结果 (list of lists)
+        例如: [['H', 'e', 'l', 'l', 'o'], ['W', 'o', 'r', 'l', 'd']]
         """
-        # 1. 文本转音素 (List of List)
-        phonemes_list = piper_phonemize.phonemize_espeak(
-            text, self.espeak_voice
-        )
+        return piper_phonemize.phonemize_espeak(text, self.espeak_voice)
+
+    def sequence_to_tensor_dict(self, phoneme_ids, speaker_id=0):
+        """将单个句子的音素ID转为Tensor字典"""
+        # 1. 插入 Pad (Intersperse)
+        interspersed = self.intersperse(phoneme_ids, self.pad_id)
         
-        # 展平
-        phonemes = []
-        for p in phonemes_list:
-            phonemes.extend(p)
-
-        # 2. 音素转 ID
-        phoneme_ids = []
-        for phoneme in phonemes:
-            if phoneme in self.phoneme_id_map:
-                phoneme_ids.extend(self.phoneme_id_map[phoneme])
-            # 可以在这里处理未知音素的逻辑
-
-        # 3. 构建序列
-        if not phoneme_ids:
-            # 如果是空文本，至少返回 [BOS, EOS] 或 [BOS, Pad, EOS]
-            return [self.bos_id, self.pad_id, self.eos_id]
-
-        # 步骤 A: 先做基础插入 [P1, 0, P2]
-        interspersed_ids = self.intersperse(phoneme_ids, self.pad_id)
-        
-        # 步骤 B: 在 BOS 后和 EOS 前强制补充 Pad
-        # 逻辑: [BOS] + [Pad] + [P1, 0, P2] + [Pad] + [EOS]
+        # 2. 全包裹 Pad (BOS + Pad + ... + Pad + EOS)
         sequence = (
             [self.bos_id] + 
             [self.pad_id] + 
-            interspersed_ids + 
+            interspersed + 
             [self.pad_id] + 
             [self.eos_id]
         )
-        
-        return sequence
 
-    def prepare_tensor(self, text, speaker_id=0):
-        sequence = self.text_to_ids(text)
-        
+        # 3. 构建 Tensor
         input_tensor = np.array([sequence], dtype=np.int64)
         input_lengths = np.array([len(sequence)], dtype=np.int64)
-        
-        # Scales: noise, length(语速), noise_w
         scales = np.array([0.667, 1.0, 0.8], dtype=np.float32)
 
         inputs = {
@@ -88,36 +57,60 @@ class PiperPreprocessor:
             
         return inputs
 
-# --- 验证逻辑 ---
+    def process_text(self, text, speaker_id=0):
+        """
+        主入口：输入整段文本，返回一个生成器(Generator)或列表。
+        每个元素对应一个句子的 Tensor 输入字典。
+        """
+        # 1. 获取分句后的音素列表 (List of Lists)
+        sentences_phonemes = self.get_phonemes_batch(text)
+        
+        results = []
+        for sentence_p in sentences_phonemes:
+            # 2. 音素转 ID
+            ids = []
+            for p in sentence_p:
+                if p in self.phoneme_id_map:
+                    ids.extend(self.phoneme_id_map[p])
+            
+            # 3. 只有当句子有内容时才处理
+            if ids:
+                tensor_dict = self.sequence_to_tensor_dict(ids, speaker_id)
+                results.append(tensor_dict)
+                
+        return results
+
+# --- 模拟运行 ---
 if __name__ == "__main__":
-    # 模拟 Config 结构 (如果没有真实文件，用这个测试)
-    # 实际使用时请传入真实 json 路径
-    mock_config = {
-        "phoneme_id_map": {"^": [1], "$": [2], "_": [0], "a": [3], "b": [4]},
-        "espeak": {"voice": "en-us"},
-        "num_speakers": 1
-    }
+    # 模拟 Config
+    config_path = "en_US-lessac-medium.onnx.json"
     
-    # 为了演示，我们 mock 一个类实例
-    print("--- 正在进行结构验证 ---")
-    preprocessor = PiperPreprocessor("en_US-lessac-medium.onnx.json") # 替换为你的真实文件
-    
-    # 假设输入文本对应的音素 ID 是 [10, 11] (两个音素)
-    # 我们期望看到: [1, 0, 10, 0, 11, 0, 2] (长度 7)
-    
-    # 这里我们直接打印 text_to_ids 的结果
-    text = "Hello" # 假设 Hello 被转为若干音素
-    ids = preprocessor.text_to_ids(text)
-    
-    print(f"生成的 ID 序列: {ids}")
-    
-    # 检查 BOS 后是否是 Pad
-    check_start = (ids[0] == preprocessor.bos_id and ids[1] == preprocessor.pad_id)
-    # 检查 EOS 前是否是 Pad
-    check_end = (ids[-1] == preprocessor.eos_id and ids[-2] == preprocessor.pad_id)
-    
-    print(f"BOS 后有 Pad? {check_start}")
-    print(f"EOS 前有 Pad? {check_end}")
-    
-    if check_start and check_end:
-        print
+    try:
+        preprocessor = PiperPreprocessor(config_path)
+        
+        # 输入一段长文本（包含两个句子）
+        long_text = "Hello world. This is the second sentence."
+        
+        # 获取所有句子的 Tensor 输入
+        tensor_inputs_list = preprocessor.process_text(long_text)
+        
+        print(f"检测到 {len(tensor_inputs_list)} 个句子，准备分别送入模型...\n")
+        
+        import onnxruntime as ort
+        # model_path = "en_US-lessac-medium.onnx"
+        # sess = ort.InferenceSession(model_path)
+        
+        audio_pieces = []
+        
+        for i, inputs in enumerate(tensor_inputs_list):
+            print(f"--- 处理第 {i+1} 句 ---")
+            print(f"Input Shape: {inputs['input'].shape}")
+            
+            # 在这里运行推理
+            # audio = sess.run(None, inputs)[0]
+            # audio_pieces.append(audio)
+            
+        print("\n处理完成。后续步骤：将 audio_pieces 拼接，并建议在中间插入少量静音数据。")
+
+    except Exception as e:
+        print(f"Error: {e}")
