@@ -1,116 +1,141 @@
 import json
 import numpy as np
 import piper_phonemize
+import os
 
-class PiperPreprocessor:
+class PiperOracle:
     def __init__(self, config_path):
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"找不到配置文件: {config_path}")
+            
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.phoneme_id_map = self.config['phoneme_id_map']
         self.espeak_voice = self.config['espeak']['voice']
         
+        # --- 关键修正 1: 安全获取特殊 Token ID ---
+        # 如果 JSON 里没有定义，给出默认值并报警
         self.pad_id = self.phoneme_id_map.get('_', [0])[0]
         self.bos_id = self.phoneme_id_map.get('^', [1])[0]
         self.eos_id = self.phoneme_id_map.get('$', [2])[0]
+        
+        print(f"DEBUG: Token IDs loaded -> PAD: {self.pad_id}, BOS: {self.bos_id}, EOS: {self.eos_id}")
 
-    def intersperse(self, lst, item):
-        if not lst: return []
-        result = [item] * (len(lst) * 2 - 1)
-        result[0::2] = lst
-        return result
-
-    def get_phonemes_batch(self, text):
-        """
-        核心修改：直接返回 piper-phonemize 的原始结果 (list of lists)
-        例如: [['H', 'e', 'l', 'l', 'o'], ['W', 'o', 'r', 'l', 'd']]
-        """
+    def get_phonemes(self, text):
+        """调用 espeak 生成音素"""
+        # 返回 List[List[str]]，例如 [['h','e','l','l','o']]
         return piper_phonemize.phonemize_espeak(text, self.espeak_voice)
 
-    def sequence_to_tensor_dict(self, phoneme_ids, speaker_id=0):
-        """将单个句子的音素ID转为Tensor字典"""
-        # 1. 插入 Pad (Intersperse)
-        interspersed = self.intersperse(phoneme_ids, self.pad_id)
-        
-        # 2. 全包裹 Pad (BOS + Pad + ... + Pad + EOS)
-        sequence = (
-            [self.bos_id] + 
-            [self.pad_id] + 
-            interspersed + 
-            [self.pad_id] + 
-            [self.eos_id]
-        )
-
-        # 3. 构建 Tensor
-        input_tensor = np.array([sequence], dtype=np.int64)
-        input_lengths = np.array([len(sequence)], dtype=np.int64)
-        scales = np.array([0.667, 1.0, 0.8], dtype=np.float32)
-
-        inputs = {
-            "input": input_tensor,
-            "input_lengths": input_lengths,
-            "scales": scales
-        }
-        
-        if self.config.get('num_speakers', 1) > 1:
-            inputs["sid"] = np.array([speaker_id], dtype=np.int64)
-            
-        return inputs
-
-    def process_text(self, text, speaker_id=0):
+    def ids_to_tensor_sequence(self, phoneme_ids):
         """
-        主入口：输入整段文本，返回一个生成器(Generator)或列表。
-        每个元素对应一个句子的 Tensor 输入字典。
+        核心修正 2: 使用 VITS 标准全填充逻辑
+        输入: [P1, P2]
+        输出: [BOS, 0, P1, 0, P2, 0, EOS]
         """
-        # 1. 获取分句后的音素列表 (List of Lists)
-        sentences_phonemes = self.get_phonemes_batch(text)
+        if not phoneme_ids:
+            return []
+
+        # 创建一个全为 Pad 的列表，长度为 2*N + 1
+        # 例子: id长度2 -> Pad长度 5 [0, 0, 0, 0, 0]
+        sequence = [self.pad_id] * (len(phoneme_ids) * 2 + 1)
+        
+        # 将音素填入奇数位置 (1, 3, 5...)
+        # 结果: [0, P1, 0, P2, 0]
+        sequence[1::2] = phoneme_ids
+        
+        # 添加首尾
+        final_sequence = [self.bos_id] + sequence + [self.eos_id]
+        
+        return final_sequence
+
+    def process(self, text, speaker_id=0):
+        # 1. 获取音素
+        batch_phonemes = self.get_phonemes(text)
         
         results = []
-        for sentence_p in sentences_phonemes:
-            # 2. 音素转 ID
+        for i, sentence_phonemes in enumerate(batch_phonemes):
+            print(f"DEBUG: 第 {i+1} 句原始音素: {sentence_phonemes}")
+            
+            # 2. 映射为 ID
             ids = []
-            for p in sentence_p:
+            for p in sentence_phonemes:
                 if p in self.phoneme_id_map:
                     ids.extend(self.phoneme_id_map[p])
+                else:
+                    # 打印未知音素，方便排查
+                    print(f"WARNING: 跳过未知音素/符号 '{p}' (ASCII: {ord(p)})")
             
-            # 3. 只有当句子有内容时才处理
-            if ids:
-                tensor_dict = self.sequence_to_tensor_dict(ids, speaker_id)
-                results.append(tensor_dict)
-                
+            if not ids:
+                print("WARNING: 该句子没有生成任何有效 ID，跳过。")
+                continue
+
+            # 3. 生成带 Pad 的序列
+            sequence = self.ids_to_tensor_sequence(ids)
+            print(f"DEBUG: 最终序列片段 (前10个): {sequence[:10]}...")
+
+            # 4. 构建 Tensor (严格控制 Type 和 Shape)
+            # input shape: (1, sequence_length)
+            input_tensor = np.array([sequence], dtype=np.int64)
+            
+            # input_lengths shape: (1,) 注意不是 (1,1)
+            input_lengths = np.array([len(sequence)], dtype=np.int64)
+            
+            # scales shape: (3,)
+            # noise=0.667, length=1.0 (语速), noise_w=0.8
+            scales = np.array([0.667, 1.0, 0.8], dtype=np.float32)
+
+            inputs = {
+                "input": input_tensor,
+                "input_lengths": input_lengths,
+                "scales": scales
+            }
+
+            # 5. 处理多说话人 (Speaker ID)
+            if self.config.get('num_speakers', 1) > 1:
+                # sid shape: (1,)
+                inputs["sid"] = np.array([speaker_id], dtype=np.int64)
+                print(f"DEBUG: 添加 Speaker ID: {speaker_id}")
+
+            results.append(inputs)
+            
         return results
 
-# --- 模拟运行 ---
+# --- 验证环节 ---
 if __name__ == "__main__":
-    # 模拟 Config
-    config_path = "en_US-lessac-medium.onnx.json"
+    # 请务必修改这里为你的真实路径
+    config_file = "en_US-lessac-medium.onnx.json"
+    model_file = "en_US-lessac-medium.onnx" # 仅用于检查路径
     
+    test_text = "Test."
+
     try:
-        preprocessor = PiperPreprocessor(config_path)
-        
-        # 输入一段长文本（包含两个句子）
-        long_text = "Hello world. This is the second sentence."
-        
-        # 获取所有句子的 Tensor 输入
-        tensor_inputs_list = preprocessor.process_text(long_text)
-        
-        print(f"检测到 {len(tensor_inputs_list)} 个句子，准备分别送入模型...\n")
-        
-        import onnxruntime as ort
-        # model_path = "en_US-lessac-medium.onnx"
-        # sess = ort.InferenceSession(model_path)
-        
-        audio_pieces = []
-        
-        for i, inputs in enumerate(tensor_inputs_list):
-            print(f"--- 处理第 {i+1} 句 ---")
-            print(f"Input Shape: {inputs['input'].shape}")
+        if not os.path.exists(config_file):
+            print(f"❌ 错误: 找不到 {config_file}，请修改脚本中的路径。")
+        else:
+            oracle = PiperOracle(config_file)
+            inputs_list = oracle.process(test_text)
             
-            # 在这里运行推理
-            # audio = sess.run(None, inputs)[0]
-            # audio_pieces.append(audio)
-            
-        print("\n处理完成。后续步骤：将 audio_pieces 拼接，并建议在中间插入少量静音数据。")
+            if inputs_list:
+                data = inputs_list[0]
+                print("\n✅ 生成成功，Tensor 结构如下:")
+                print(f"Input Shape:   {data['input'].shape} (期望: [1, L])")
+                print(f"Length Shape:  {data['input_lengths'].shape} (期望: [1])")
+                print(f"Scales Type:   {data['scales'].dtype} (期望: float32)")
+                
+                # 检查 Pad 逻辑: BOS 后必须是 Pad (ID通常为0)
+                seq = data['input'][0]
+                bos = oracle.bos_id
+                pad = oracle.pad_id
+                
+                # 检查: [BOS, Pad, P1, Pad...]
+                if seq[0] == bos and seq[1] == pad:
+                    print("✅ Pad 逻辑验证通过: BOS 后紧接 Pad")
+                else:
+                    print(f"❌ Pad 逻辑异常: 序列开头是 {seq[:5]}")
+            else:
+                print("❌ 未生成任何有效输入。")
 
     except Exception as e:
-        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
