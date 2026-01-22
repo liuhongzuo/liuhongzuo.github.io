@@ -8,52 +8,63 @@ class PiperPreprocessor:
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
-        # 加载音素ID映射表
         self.phoneme_id_map = self.config['phoneme_id_map']
-        # 获取 espeak 语言设置 (例如 'en-us')
         self.espeak_voice = self.config['espeak']['voice']
         
-        # 特殊 Token ID (根据 Piper 标准)
+        # 获取特殊 Token ID
+        # Piper 中 Pad 默认为 '_', ID 通常是 0
         self.pad_id = self.phoneme_id_map.get('_', [0])[0]
-        self.bos_id = self.phoneme_id_map.get('^', [1])[0] # 句首
-        self.eos_id = self.phoneme_id_map.get('$', [2])[0] # 句尾
+        self.bos_id = self.phoneme_id_map.get('^', [1])[0]
+        self.eos_id = self.phoneme_id_map.get('$', [2])[0]
 
-    def text_to_ids(self, text):
-        """将文本转换为音素 ID 列表"""
-        # 1. 使用 piper-phonemize 将文本转为音素列表
-        # 返回的是 list of list，因为可能有多个句子
+    def intersperse(self, lst, item):
+        """
+        在列表的每个元素中间插入 item (Pad ID)
+        例如: [1, 2, 3] -> [1, 0, 2, 0, 3]
+        """
+        if not lst:
+            return []
+        result = [item] * (len(lst) * 2 - 1)
+        result[0::2] = lst
+        return result
+
+    def text_to_ids(self, text, use_intersperse=True):
+        """将文本转换为音素 ID 列表，并根据需要插入 Pad"""
+        # 1. 文本转音素
         phonemes_list = piper_phonemize.phonemize_espeak(
             text, self.espeak_voice
         )
         
-        # 展平为一个列表 (假设输入是一个长句)
         phonemes = []
         for p in phonemes_list:
             phonemes.extend(p)
 
-        # 2. 将音素映射为 ID
-        sequence = [self.bos_id]  # 添加句首 Token
-        
+        # 2. 音素转 ID
+        # 注意：先转 ID 列表，再处理 BOS/EOS 和 Pad
+        phoneme_ids = []
         for phoneme in phonemes:
             if phoneme in self.phoneme_id_map:
-                sequence.extend(self.phoneme_id_map[phoneme])
+                phoneme_ids.extend(self.phoneme_id_map[phoneme])
             else:
                 print(f"Warning: Skipping unknown phoneme '{phoneme}'")
         
-        sequence.append(self.eos_id)  # 添加句尾 Token
+        # 3. 插入 Pad (Intersperse)
+        # 这一步非常关键：通常是在 BOS 和 EOS 之间插入带 Pad 的序列
+        if use_intersperse:
+            phoneme_ids = self.intersperse(phoneme_ids, self.pad_id)
+
+        # 4. 构建最终序列： BOS + [Pads...] + EOS
+        sequence = [self.bos_id] + phoneme_ids + [self.eos_id]
         
         return sequence
 
     def prepare_tensor(self, text, speaker_id=0):
-        """生成可以直接输入 ONNX 模型的字典"""
-        sequence = self.text_to_ids(text)
+        sequence = self.text_to_ids(text, use_intersperse=True)
         
-        # 转换为 numpy 数组，类型必须是 int64
         input_tensor = np.array([sequence], dtype=np.int64)
         input_lengths = np.array([len(sequence)], dtype=np.int64)
         
-        # 设置 scales (noise_scale, length_scale, noise_w)
-        # 默认值: noise=0.667, length=1.0 (语速), noise_w=0.8
+        # Scales: noise, length(语速), noise_w
         scales = np.array([0.667, 1.0, 0.8], dtype=np.float32)
 
         inputs = {
@@ -62,39 +73,31 @@ class PiperPreprocessor:
             "scales": scales
         }
         
-        # 如果是多说话人模型，需要添加 sid
         if self.config.get('num_speakers', 1) > 1:
             inputs["sid"] = np.array([speaker_id], dtype=np.int64)
             
         return inputs
 
-# --- 使用示例 ---
+# --- 测试部分 ---
 if __name__ == "__main__":
-    # 请替换为你实际的模型路径
+    # 替换你的模型路径
     model_path = "en_US-lessac-medium.onnx"
     config_path = "en_US-lessac-medium.onnx.json"
     
-    # 模拟输入
-    text = "Hello, this is a test for Piper tensor generation."
+    text = "Piper is awesome"
     
     try:
-        # 1. 初始化预处理器
         preprocessor = PiperPreprocessor(config_path)
-        
-        # 2. 获取输入张量字典
         tensor_inputs = preprocessor.prepare_tensor(text)
         
-        print(f"Input Tensor Shape: {tensor_inputs['input'].shape}")
-        print(f"Input IDs: {tensor_inputs['input']}")
-        print(f"Scales: {tensor_inputs['scales']}")
+        print(f"生成的 ID 序列: {tensor_inputs['input'][0]}")
+        print(f"序列长度: {tensor_inputs['input_lengths']}")
         
-        # 3. (可选) 尝试运行推理
-        # session = ort.InferenceSession(model_path)
-        # audio = session.run(None, tensor_inputs)[0]
-        # print(f"Generated audio shape: {audio.shape}")
-        # print("Success! Audio generated.")
-        
-    except FileNotFoundError:
-        print("错误: 未找到模型文件，请确保 .json 和 .onnx 文件路径正确。")
+        # 验证 Pad 是否插入成功 (假设 Pad ID 为 0)
+        ids = tensor_inputs['input'][0]
+        # 跳过 BOS(首) 和 EOS(尾)，检查中间是否隔一个就是一个 0
+        is_interspersed = all(x == 0 for x in ids[2:-1:2])
+        print(f"Pad (ID=0) 插入检查: {'成功' if is_interspersed else '失败'}")
+
     except Exception as e:
-        print(f"发生错误: {e}")
+        print(f"Error: {e}")
