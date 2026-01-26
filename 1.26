@@ -59,3 +59,48 @@ VirtualExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_vi
 }
 
 
+#include "core/framework/op_kernel.h"
+
+namespace onnxruntime {
+
+class VirtualAdd : public OpKernel {
+ public:
+  VirtualAdd(const OpKernelInfo& info) : OpKernel(info) {}
+
+  Status Compute(OpKernelContext* context) const override {
+    // 1. 获取输入 Tensor
+    const auto* X = context->Input<Tensor>(0);
+    const auto* Y = context->Input<Tensor>(1);
+    
+    // 2. 准备输出 Tensor
+    auto X_shape = X->Shape();
+    auto* Z = context->Output(0, X_shape);
+
+    // 3. 执行计算 (这里为了演示，直接用 CPU 循环模拟硬件加速)
+    const float* x_data = X->Data<float>();
+    const float* y_data = Y->Data<float>();
+    float* z_data = Z->MutableData<float>();
+    
+    size_t size = X_shape.Size();
+    for (size_t i = 0; i < size; i++) {
+        // 假装我们在 Virtual NPU 上执行
+        z_data[i] = x_data[i] + y_data[i]; 
+    }
+
+    return Status::OK();
+  }
+};
+
+// 定义 Kernel 注册表
+ONNX_OPERATOR_KERNEL_EX(
+    Add,                                    // Op Name
+    kOnnxDomain,                            // Domain
+    7,                                      // Version
+    kVirtualExecutionProvider,              // Provider Type
+    KernelDefBuilder()
+        .TypeConstraint("T", DataTypeImpl::GetTensorType<float>()), 
+    VirtualAdd);                            // Kernel Class
+}
+
+
+
