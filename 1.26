@@ -26,3 +26,36 @@ class VirtualExecutionProvider : public IExecutionProvider {
   std::shared_ptr<KernelRegistry> GetKernelRegistry() const override;
 };
 } // namespace onnxruntime
+
+#include "virtual_execution_provider.h"
+
+namespace onnxruntime {
+
+std::vector<std::unique_ptr<ComputeCapability>> 
+VirtualExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_viewer,
+                                        const IKernelLookup& /*kernel_lookup*/) const {
+  std::vector<std::unique_ptr<ComputeCapability>> result;
+
+  // 遍历图中所有节点
+  for (const auto& node : graph_viewer.Nodes()) {
+    // 假设我们的 VirtualEP 只支持 "Add" 算子
+    if (node.OpType() == "Add") {
+      
+      // 创建一个 ComputeCapability
+      std::unique_ptr<ComputeCapability> cc = std::make_unique<ComputeCapability>();
+      
+      // 定义这是一个单一节点执行 (如果是编译器后端，可能会把多个节点融合成一个子图)
+      cc->sub_graph = nullptr; 
+      cc->nodes_to_optimize.push_back(node.Index());
+      
+      // 声明这个能力属于 VirtualEP
+      cc->type = "VirtualExecutionProvider";
+      
+      result.push_back(std::move(cc));
+    }
+  }
+  return result;
+}
+}
+
+
