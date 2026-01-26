@@ -1,0 +1,28 @@
+#pragma once
+#include "core/framework/execution_provider.h"
+
+namespace onnxruntime {
+
+// 继承 IExecutionProvider
+class VirtualExecutionProvider : public IExecutionProvider {
+ public:
+  explicit VirtualExecutionProvider(const VirtualExecutionProviderInfo& info)
+      : IExecutionProvider{onnxruntime::kVirtualExecutionProvider} { // 定义你的 EP 类型名称
+    
+    // 初始化你的 Device 分配器（如果是真实硬件，这里要分配 Device 内存）
+    // 这里我们只是模拟，复用 CPU 分配器
+    AllocatorCreationInfo default_memory_info(
+        [](int) { return std::make_unique<CPUAllocator>(); },
+        0, true);
+    InsertAllocator(CreateAllocator(default_memory_info));
+  }
+
+  // 核心函数 1: 告诉 ORT 你支持哪些节点
+  std::vector<std::unique_ptr<ComputeCapability>> 
+  GetCapability(const onnxruntime::GraphViewer& graph_viewer,
+                const IKernelLookup& /*kernel_lookup*/) const override;
+
+  // 核心函数 2: 提供你的 Kernel 实现注册表
+  std::shared_ptr<KernelRegistry> GetKernelRegistry() const override;
+};
+} // namespace onnxruntime
