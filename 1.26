@@ -110,5 +110,52 @@ std::shared_ptr<KernelRegistry> VirtualExecutionProvider::GetKernelRegistry() co
   return kernel_registry;
 }
 
+#include "virtual_execution_provider.h"
+#include "core/framework/kernel_registry.h"
+
+namespace onnxruntime {
+
+// 关键点 A: 
+// 你需要引用那个宏生成的类名。
+// ORT 提供了一个宏 ONNX_OPERATOR_KERNEL_CLASS_NAME 来帮助你拼接这个名字。
+// 参数必须和你在 virtual_add.cc 里写的一模一样！
+class ONNX_OPERATOR_KERNEL_CLASS_NAME(
+    kVirtualExecutionProvider, 
+    kOnnxDomain, 
+    7, 
+    Add);
+
+// 关键点 B:
+// 实现 GetKernelRegistry
+std::shared_ptr<KernelRegistry> VirtualExecutionProvider::GetKernelRegistry() const {
+  // 1. 创建一个静态的注册表对象 (保证只初始化一次，节省性能)
+  static std::shared_ptr<KernelRegistry> kernel_registry = std::make_shared<KernelRegistry>();
+
+  // 2. 如果注册表是空的，说明是第一次调用，我们需要把算子加进去
+  if (kernel_registry->IsEmpty()) {
+    
+    // 3. 使用 BuildKernelCreateInfo 模板函数
+    // 这个函数会利用上面的 "关键点 A" 声明的类，生成注册所需的元数据
+    Status status = kernel_registry->Register(
+        BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(
+            kVirtualExecutionProvider, 
+            kOnnxDomain, 
+            7, 
+            Add)>()
+    );
+
+    // 严谨一点，检查是否注册成功
+    if (!status.IsOK()) {
+        // 在这里记录 Log 或抛出异常
+        LOGS_DEFAULT(ERROR) << "Failed to register VirtualEP kernel: " << status.ErrorMessage();
+    }
+  }
+
+  return kernel_registry;
+}
+
+} // namespace onnxruntime
+
+
 
 
