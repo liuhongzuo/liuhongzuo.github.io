@@ -103,4 +103,12 @@ ONNX_OPERATOR_KERNEL_EX(
 }
 
 
+std::shared_ptr<KernelRegistry> VirtualExecutionProvider::GetKernelRegistry() const {
+  static std::shared_ptr<KernelRegistry> kernel_registry = std::make_shared<KernelRegistry>();
+  // 这里的 BuildKernelCreateInfo<ONNX_OPERATOR_KERNEL_CLASS_NAME(..., VirtualAdd)> 是宏展开后的辅助函数
+  // 实际开发中，通常会有一个注册辅助函数来自动处理所有 Kernels
+  return kernel_registry;
+}
+
+
 
