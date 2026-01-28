@@ -1,0 +1,93 @@
+// onnxruntime/core/providers/mysimple/mysimple_execution_provider.cc
+#include "mysimple_execution_provider.h"
+#include "core/framework/compute_capability.h"
+#include "core/framework/tensorprotoutils.h"
+
+namespace onnxruntime {
+
+// ==========================================================
+// 1. 定义具体的 Kernel (Relu 的实现)
+// ==========================================================
+template <typename T>
+class MySimpleRelu : public OpKernel {
+ public:
+  explicit MySimpleRelu(const OpKernelInfo& info) : OpKernel(info) {}
+
+  Status Compute(OpKernelContext* context) const override {
+    // 打印日志，证明我们在运行！
+    printf("[MySimpleEP] Executing Relu Kernel!\n");
+
+    // 获取输入
+    const Tensor* X = context->Input<Tensor>(0);
+    if (X == nullptr) return Status(common::ONNXRUNTIME, common::FAIL, "Input count mismatch");
+    
+    // 准备输出 (形状与输入相同)
+    const TensorShape& shape = X->Shape();
+    Tensor* Y = context->Output(0, shape);
+
+    // 获取原始数据指针
+    const T* X_data = X->Data<T>();
+    T* Y_data = Y->MutableData<T>();
+    
+    // 执行 Relu 计算: y = max(0, x)
+    size_t size = shape.Size();
+    for (size_t i = 0; i < size; i++) {
+        Y_data[i] = (X_data[i] > 0) ? X_data[i] : 0;
+    }
+
+    return Status::OK();
+  }
+};
+
+// ==========================================================
+// 2. EP 的实现
+// ==========================================================
+
+MySimpleExecutionProvider::MySimpleExecutionProvider(const ProviderOptions& info)
+    : IExecutionProvider{kMySimpleExecutionProvider} {
+  // 这里可以处理 info 传入的配置参数
+}
+
+// GetCapability: 决定我们接管哪些节点
+std::vector<std::unique_ptr<ComputeCapability>> 
+MySimpleExecutionProvider::GetCapability(
+    const onnxruntime::GraphViewer& graph,
+    const IKernelLookup& /*kernel_lookup*/) const {
+  
+  std::vector<std::unique_ptr<ComputeCapability>> result;
+
+  // 遍历图中所有的节点
+  for (const auto& node : graph.Nodes()) {
+    // 简单的逻辑：如果算子叫 "Relu"，我们就接管它
+    if (node.OpType() == "Relu" && node.Domain() == kOnnxDomain) {
+      
+      // 创建一个 Capability 对象
+      std::unique_ptr<IndexedSubGraph> sub_graph = std::make_unique<IndexedSubGraph>();
+      sub_graph->nodes.push_back(node.Index()); // 将该节点加入子图
+
+      // 这里的 "MySimpleRelu_1" 是给这个子图起个唯一的名字，Kernel-based 模式下并不严格
+      result.push_back(std::make_unique<ComputeCapability>(std::move(sub_graph)));
+    }
+  }
+  return result;
+}
+
+// 注册 Kernel
+std::shared_ptr<KernelRegistry> MySimpleExecutionProvider::GetKernelRegistry() const {
+  static std::shared_ptr<KernelRegistry> kernel_registry = std::make_shared<KernelRegistry>();
+  
+  // 防止重复注册
+  if (kernel_registry->IsEmpty()) {
+    // 注册 Float 类型的 Relu
+    kernel_registry->Register(BuildKernel<MySimpleRelu<float>>(
+        *this,                          // Provider
+        kOnnxDomain,                    // Domain
+        "Relu",                         // Op Name
+        1,                              // Op Version (简化处理，假设是版本1)
+        kCpuExecutionProvider           // 这里的 input memory type 设为 CPU
+    ));
+  }
+  return kernel_registry;
+}
+
+}  // namespace onnxruntime
