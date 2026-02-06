@@ -1,128 +1,59 @@
 import os
 import re
-import sys
 
-# 定义支持的源文件扩展名
-SOURCE_EXTENSIONS = ('.cc', '.cpp', '.c', '.cxx')
+# 匹配 #include "..." 格式的正则，过滤掉标准库 <...>
+INCLUDE_PATTERN = re.compile(r'#\s*include\s*"(.*?)"')
 
-def get_project_root_search_path():
-    """
-    根据用户描述：执行脚本的路径是 "core/providers/gaia"，
-    但代码中出现了 "#include \"core/providers/gaia/...\"" 这种形式。
-    这说明 include 是基于项目根目录的。
-    因此，我们需要将当前路径向上回溯 3 级作为搜索路径之一。
-    """
-    current_dir = os.getcwd()
-    # 向上回溯 3 级：gaia -> providers -> core -> ROOT
-    project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
-    return project_root
+def get_dependencies(file_path, root_dir):
+    """解析单个文件的头文件依赖"""
+    dependencies = []
+    if not os.path.exists(file_path):
+        return dependencies
 
-def resolve_include_path(current_file_path, include_str, search_paths):
-    """
-    尝试解析头文件的真实绝对路径。
-    优先检查相对于当前文件的路径，然后检查搜索路径。
-    """
-    # 1. 尝试相对于当前文件的路径 (处理 "../common/enn_log.hpp" 这种情况)
-    current_file_dir = os.path.dirname(current_file_path)
-    relative_path = os.path.join(current_file_dir, include_str)
-    if os.path.exists(relative_path):
-        return os.path.abspath(relative_path)
-
-    # 2. 尝试基于搜索路径 (处理 "core/providers/gaia/..." 这种情况)
-    for path in search_paths:
-        search_path = os.path.join(path, include_str)
-        if os.path.exists(search_path):
-            return os.path.abspath(search_path)
-
-    return None
-
-def parse_dependencies(file_path, search_paths, visited=None, depth=0):
-    """
-    递归解析文件的依赖。
-    """
-    if visited is None:
-        visited = set()
-    
-    # 避免循环引用死循环
-    if file_path in visited:
-        return []
-    visited.add(file_path)
-
-    deps = []
-    
-    try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"[Error] 无法读取文件 {file_path}: {e}")
-        return []
-
-    # 正则匹配 #include "..."
-    # 解释：^\s* 允许行首有空格，#include，\s* 允许空格，"(.*?)" 捕获引号内的内容
-    include_pattern = re.compile(r'^\s*#include\s*"(.*?)"', re.MULTILINE)
-    matches = include_pattern.findall(content)
-
-    for include_str in matches:
-        resolved_path = resolve_include_path(file_path, include_str, search_paths)
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
         
-        if resolved_path:
-            # 记录找到的头文件
-            deps.append(resolved_path)
-            # 递归查找该头文件的依赖
-            sub_deps = parse_dependencies(resolved_path, search_paths, visited, depth + 1)
-            deps.extend(sub_deps)
-        else:
-            # 可选：打印找不到的头文件（通常是系统头文件或路径配置不对）
-            # print(f"  [Warning] 未找到头文件: {include_str} (in {os.path.basename(file_path)})")
-            pass
-
-    return deps
+    for line in lines:
+        match = INCLUDE_PATTERN.search(line)
+        if match:
+            include_path = match.group(1)
+            
+            # 逻辑 1：尝试相对于当前文件路径解析 (../common/...)
+            current_file_dir = os.path.dirname(file_path)
+            path_relative_to_file = os.path.normpath(os.path.join(current_file_dir, include_path))
+            
+            # 逻辑 2：尝试相对于脚本执行的根路径解析 (core/providers/...)
+            path_relative_to_root = os.path.normpath(os.path.join(root_dir, include_path))
+            
+            if os.path.exists(path_relative_to_file):
+                dependencies.append(path_relative_to_file)
+            elif os.path.exists(path_relative_to_root):
+                dependencies.append(path_relative_to_root)
+                
+    return dependencies
 
 def main():
-    # 1. 确定搜索路径
-    # 包含当前目录
-    search_paths = [os.getcwd()]
+    # 获取脚本运行的根目录
+    root_dir = os.getcwd()
+    source_extensions = ('.cc', '.cpp')
     
-    # 添加推断出的项目根目录
-    project_root = get_project_root_search_path()
-    search_paths.append(project_root)
-    
-    print(f"[*] 执行路径: {os.getcwd()}")
-    print(f"[*] 推断的项目根目录 (Search Path): {project_root}")
-    print("-" * 60)
+    print(f"--- 正在搜索目录: {root_dir} ---")
 
-    # 2. 递归查找当前目录下的所有 cc/cpp 文件
-    source_files = []
-    for root, dirs, files in os.walk(os.getcwd()):
-        for file in files:
-            if file.lower().endswith(SOURCE_EXTENSIONS):
-                source_files.append(os.path.join(root, file))
-
-    if not source_files:
-        print("[!] 当前目录下未找到 .cc 或 .cpp 文件。")
-        return
-
-    # 3. 解析并打印依赖
-    for src_file in source_files:
-        rel_src_path = os.path.relpath(src_file, os.getcwd())
-        print(f"\n[+] 分析文件: {rel_src_path}")
-        
-        # 获取所有依赖（使用 set 去重，因为递归可能导致同一个头文件被多次引用）
-        dependencies = parse_dependencies(src_file, search_paths, visited=set())
-        
-        # 去重并排序
-        unique_deps = sorted(list(set(dependencies)))
-        
-        if unique_deps:
-            for dep in unique_deps:
-                # 打印出相对于项目根目录或当前目录的路径，方便阅读
-                try:
-                    display_path = os.path.relpath(dep, os.getcwd())
-                except ValueError:
-                    display_path = dep
-                print(f"    -> {display_path}")
-        else:
-            print("    (无本地头文件依赖)")
+    for dirpath, _, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if filename.endswith(source_extensions):
+                full_source_path = os.path.join(dirpath, filename)
+                
+                # 获取该源码文件的依赖
+                deps = get_dependencies(full_source_path, root_dir)
+                
+                # 打印结果（只打印找到依赖的文件）
+                if deps:
+                    relative_source = os.path.relpath(full_source_path, root_dir)
+                    print(f"\n[Source]: {relative_source}")
+                    for dep in set(deps): # set去重
+                        relative_dep = os.path.relpath(dep, root_dir)
+                        print(f"  └── [Header]: {relative_dep}")
 
 if __name__ == "__main__":
     main()
