@@ -1,0 +1,161 @@
+import sys
+import os
+import clang.cindex
+from collections import defaultdict
+
+# ================= 配置区域 =================
+# 如果脚本报错找不到 libclang，请手动指定库路径 (Windows示例)
+# clang.cindex.Config.set_library_path('C:/Program Files/LLVM/bin')
+# Linux 示例:
+# clang.cindex.Config.set_library_path('/usr/lib/llvm-14/lib')
+
+class CppDependencyAnalyzer:
+    def __init__(self, target_dir, extensions=None):
+        self.target_dir = os.path.abspath(target_dir)
+        self.extensions = extensions or ['.cpp', '.c', '.cc', '.cxx', '.h', '.hpp']
+        self.index = clang.cindex.Index.create()
+        # 存储定义: { 'function_signature': Cursor }
+        self.definitions = {} 
+        # 缓存文件解析结果，避免重复解析
+        self.translation_units = {}
+        
+    def is_target_file(self, file_path):
+        return any(file_path.endswith(ext) for ext in self.extensions)
+
+    def get_function_signature(self, cursor):
+        """获取函数的唯一标识，包含命名空间等，例如 MyClass::myMethod"""
+        # 尝试使用 USR (Unified Symbol Resolution) 作为唯一ID，或者使用 displayname
+        # USR 最准确，但在未完全编译（缺头文件）时可能不完整。
+        # 这里结合 spelling 和 semantic parent 来做近似匹配。
+        
+        parts = []
+        curr = cursor
+        while curr and curr.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
+            if curr.kind in [clang.cindex.CursorKind.NAMESPACE, 
+                             clang.cindex.CursorKind.CLASS_DECL, 
+                             clang.cindex.CursorKind.STRUCT_DECL,
+                             clang.cindex.CursorKind.FUNCTION_DECL,
+                             clang.cindex.CursorKind.CXX_METHOD]:
+                parts.append(curr.spelling)
+            curr = curr.semantic_parent
+        
+        return "::".join(reversed(parts)) if parts else cursor.spelling
+
+    def build_index(self):
+        """遍历目录建立函数定义索引"""
+        print(f"正在扫描目录: {self.target_dir} ...")
+        count = 0
+        for root, dirs, files in os.walk(self.target_dir):
+            for file in files:
+                if self.is_target_file(file):
+                    full_path = os.path.join(root, file)
+                    self._parse_and_index_file(full_path)
+                    count += 1
+        print(f"索引构建完成。扫描了 {count} 个文件，发现了 {len(self.definitions)} 个函数定义。")
+
+    def _parse_and_index_file(self, file_path):
+        # 使用 ParseNone 选项加快速度，但这可能降低准确度
+        # 如果项目很大，建议加上 args=['-I/path/to/include']
+        try:
+            tu = self.index.parse(file_path, args=['-std=c++17'])
+            self.translation_units[file_path] = tu
+            self._find_definitions_recursive(tu.cursor, file_path)
+        except Exception as e:
+            print(f"解析错误 {file_path}: {e}")
+
+    def _find_definitions_recursive(self, cursor, file_path):
+        # 记录所有的函数定义和方法定义
+        if cursor.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+            if cursor.is_definition():
+                sig = self.get_function_signature(cursor)
+                # 记录定义，如果重名（重载），这里简单覆盖或存列表。
+                # 为简单起见，这里存入列表处理重载
+                if sig not in self.definitions:
+                    self.definitions[sig] = []
+                self.definitions[sig].append({
+                    'file': file_path,
+                    'cursor': cursor
+                })
+
+        for child in cursor.get_children():
+            # 优化：只深入源文件本身的内容，忽略系统头文件
+            if child.location.file and child.location.file.name == file_path:
+                self._find_definitions_recursive(child, file_path)
+
+    def find_dependencies(self, start_func_name, max_depth=10):
+        """递归查找依赖"""
+        visited = set()
+        deps_tree = {}
+        
+        # 找到起始函数的所有重载/定义
+        start_nodes = self.definitions.get(start_func_name)
+        
+        if not start_nodes:
+            # 尝试模糊匹配 (比如用户输入 'foo' 但实际是 'MyClass::foo')
+            possible = [k for k in self.definitions.keys() if k.endswith(f"::{start_func_name}") or k == start_func_name]
+            if possible:
+                print(f"未找到准确匹配 '{start_func_name}'，使用: {possible[0]}")
+                start_func_name = possible[0]
+                start_nodes = self.definitions[start_func_name]
+            else:
+                print(f"错误: 在索引中未找到函数 '{start_func_name}' 的定义。")
+                return
+
+        print(f"\n开始分析函数: {start_func_name}")
+        self._recurse_deps(start_func_name, start_nodes, visited, depth=0, max_depth=max_depth)
+
+    def _recurse_deps(self, func_name, func_def_nodes, visited, depth, max_depth):
+        if depth > max_depth:
+            print("  " * depth + f"[达到最大深度] {func_name}")
+            return
+        
+        # 标记为已访问，防止递归环
+        if func_name in visited:
+            return
+        visited.add(func_name)
+
+        print("  " * depth + f"└── {func_name} (定义于: {[os.path.basename(n['file']) for n in func_def_nodes]})")
+
+        # 对于每一个定义（可能有重载），查找调用
+        for node in func_def_nodes:
+            cursor = node['cursor']
+            callees = self._get_callees_from_cursor(cursor)
+            
+            for callee_name in callees:
+                # 关键过滤：只关心定义在 target_dir 内的函数
+                if callee_name in self.definitions:
+                    self._recurse_deps(callee_name, self.definitions[callee_name], visited, depth + 1, max_depth)
+    
+    def _get_callees_from_cursor(self, cursor):
+        callees = set()
+        for child in cursor.walk_preorder():
+            if child.kind == clang.cindex.CursorKind.CALL_EXPR:
+                # 尝试解析被调用的函数
+                referenced = child.referenced
+                if referenced:
+                    sig = self.get_function_signature(referenced)
+                    callees.add(sig)
+                else:
+                    # 如果解析失败（通常是因为缺少头文件路径），退回到 spelling
+                    callees.add(child.spelling)
+        return callees
+
+# ================= 使用示例 =================
+if __name__ == "__main__":
+    # 修改这里为你的项目路径
+    PROJECT_PATH = "./my_cpp_project/src" 
+    # 修改这里为你要查找的根函数名 (如果是类方法，最好写全称 ClassName::MethodName)
+    ROOT_FUNCTION = "process_data"
+
+    if len(sys.argv) >= 2:
+        PROJECT_PATH = sys.argv[1]
+    if len(sys.argv) >= 3:
+        ROOT_FUNCTION = sys.argv[2]
+
+    if not os.path.exists(PROJECT_PATH):
+        print(f"路径不存在: {PROJECT_PATH}")
+        sys.exit(1)
+
+    analyzer = CppDependencyAnalyzer(PROJECT_PATH)
+    analyzer.build_index()
+    analyzer.find_dependencies(ROOT_FUNCTION)
