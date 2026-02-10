@@ -1,0 +1,186 @@
+import sys
+import os
+import clang.cindex
+from collections import defaultdict
+
+# ==========================================
+#              用户配置区域 (请修改这里)
+# ==========================================
+
+# 1. 设置 libclang 的路径 (如果 Python 报错找不到 libclang.dll/so)
+# Windows 示例 (安装 LLVM 后):
+# clang.cindex.Config.set_library_path(r"C:\Program Files\LLVM\bin")
+# Linux 示例:
+# clang.cindex.Config.set_library_path("/usr/lib/llvm-14/lib")
+
+# 2. 你的 C++ 项目根目录 (递归查找该目录下的函数定义)
+PROJECT_ROOT = r"./src" 
+
+# 3. 你要分析的起始函数名 (入口函数)
+TARGET_FUNCTION = "process_data"
+
+# 4. 【关键】手动添加头文件搜索路径 (解决 Error parsing 的核心)
+#    如果在运行中看到 "file not found" 错误，请把该文件所在的目录加到这里。
+INCLUDE_PATHS = [
+    r"./include",             # 项目的 include 目录
+    r"./src",                 # 项目的 src 目录 (有些项目直接 include 源文件)
+    r"./third_party",         # 第三方库目录
+    
+    # --- Windows 常见系统库路径示例 (需要根据你的 Visual Studio 版本修改) ---
+    # r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.29.30133\include",
+    # r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.19041.0\ucrt",
+    # r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.19041.0\shared",
+    
+    # --- Linux 常见系统库路径示例 ---
+    # "/usr/include/c++/9",
+    # "/usr/include/x86_64-linux-gnu/c++/9",
+    # "/usr/include",
+]
+
+# ==========================================
+#              脚本逻辑区域
+# ==========================================
+
+class DependencyAnalyzer:
+    def __init__(self, root_dir, include_paths):
+        self.root_dir = os.path.abspath(root_dir)
+        self.index = clang.cindex.Index.create()
+        self.definitions = defaultdict(list)
+        
+        # 构造编译参数
+        self.compile_args = ['-std=c++17', '-xc++'] # 强制按 C++ 解析
+        for path in include_paths:
+            if os.path.exists(path):
+                self.compile_args.append(f'-I{path}')
+            else:
+                print(f"[警告] 配置的路径不存在，已跳过: {path}")
+
+    def build_index(self):
+        """遍历目录建立索引"""
+        print(f"\n[1/3] 正在扫描文件并建立索引 (目录: {self.root_dir})...")
+        print("      注意：如果看到 'file not found'，请将其路径加入脚本的 INCLUDE_PATHS 中。\n")
+        
+        parsed_count = 0
+        error_count = 0
+
+        for root, dirs, files in os.walk(self.root_dir):
+            for file in files:
+                if file.endswith(('.cpp', '.c', '.cc', '.cxx', '.h', '.hpp')):
+                    full_path = os.path.join(root, file)
+                    success = self._parse_file(full_path)
+                    if success:
+                        parsed_count += 1
+                    else:
+                        error_count += 1
+                        
+        print(f"\n索引构建结束: 成功解析 {parsed_count} 个文件，{error_count} 个文件存在严重头文件缺失。")
+
+    def _parse_file(self, file_path):
+        try:
+            # PARSE_INCOMPLETE: 允许在有错误的情况下继续生成部分 AST
+            tu = self.index.parse(file_path, args=self.compile_args, 
+                                  options=clang.cindex.TranslationUnit.PARSE_INCOMPLETE |
+                                          clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES) 
+                                          # 注意：为了找定义，我们不需要深入函数体，
+                                          # 但为了找依赖（谁调用了谁），我们需要函数体。
+                                          # 下面为了建立定义索引，先快速扫描。
+                                          # 真正的完整解析在 find_dependencies 时可能需要更细致，
+                                          # 但为了简化，这里统一处理。
+            
+            # 重新解析一次不跳过函数体，为了后续分析
+            tu = self.index.parse(file_path, args=self.compile_args,
+                                  options=clang.cindex.TranslationUnit.PARSE_INCOMPLETE)
+
+            # --- 诊断输出 ---
+            missing_headers = set()
+            for diag in tu.diagnostics:
+                if diag.severity >= clang.cindex.Diagnostic.Error:
+                    if "file not found" in diag.spelling:
+                        header = diag.spelling.split("'")[1]
+                        missing_headers.add(header)
+            
+            if missing_headers:
+                print(f"[解析警告] {os.path.basename(file_path)} 缺失头文件: {', '.join(missing_headers)}")
+                # 即使缺失头文件，也尽量尝试提取已识别的函数
+            
+            self._extract_definitions(tu.cursor, file_path)
+            return True
+        except Exception as e:
+            print(f"[严重错误] 无法解析 {file_path}: {e}")
+            return False
+
+    def _extract_definitions(self, cursor, file_path):
+        for node in cursor.walk_preorder():
+            # 这里的逻辑：只记录在该文件内定义的函数
+            if str(node.location.file) != file_path:
+                continue
+                
+            if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+                if node.is_definition():
+                    # 获取函数签名 (简单版：函数名)
+                    # 如果需要更精确（区分重载），需要组合参数类型，这里简化处理
+                    func_name = node.spelling
+                    
+                    # 尝试处理类名 Class::Method
+                    parent = node.semantic_parent
+                    if parent and parent.kind in [clang.cindex.CursorKind.CLASS_DECL, clang.cindex.CursorKind.STRUCT_DECL]:
+                        func_name = f"{parent.spelling}::{func_name}"
+                    
+                    self.definitions[func_name].append({
+                        'file': file_path,
+                        'cursor': node
+                    })
+
+    def find_dependencies(self, start_func):
+        print(f"\n[2/3] 正在查找依赖链: {start_func}")
+        visited = set()
+        
+        if start_func not in self.definitions:
+            print(f"错误: 在扫描的文件中未找到函数定义 '{start_func}'")
+            print("可能的函数名建议:")
+            candidates = [k for k in self.definitions.keys() if start_func in k]
+            for c in candidates[:5]: print(f"  - {c}")
+            return
+
+        self._recurse(start_func, visited, 0)
+
+    def _recurse(self, func_name, visited, depth):
+        if func_name in visited or depth > 10: # 防止死循环
+            return
+        
+        visited.add(func_name)
+        
+        # 打印树状结构
+        defs = self.definitions[func_name]
+        files = list(set([os.path.basename(d['file']) for d in defs]))
+        print("  " * depth + f"└── {func_name} ({', '.join(files)})")
+
+        # 查找该函数内部调用了什么
+        for def_node in defs:
+            cursor = def_node['cursor']
+            
+            # 遍历函数体内的所有子节点
+            for child in cursor.walk_preorder():
+                if child.kind == clang.cindex.CursorKind.CALL_EXPR:
+                    # 获取被调用的函数名
+                    callee_name = child.spelling
+                    
+                    # 尝试通过引用获取更准确的名字（解决命名空间/类问题）
+                    if child.referenced:
+                        ref = child.referenced
+                        callee_name = ref.spelling
+                        parent = ref.semantic_parent
+                        if parent and parent.kind in [clang.cindex.CursorKind.CLASS_DECL, clang.cindex.CursorKind.STRUCT_DECL]:
+                            callee_name = f"{parent.spelling}::{callee_name}"
+                    
+                    # 只有当被调用的函数也在我们的源码目录中定义时，才递归
+                    if callee_name in self.definitions:
+                        self._recurse(callee_name, visited, depth + 1)
+
+if __name__ == "__main__":
+    if not os.path.exists(PROJECT_ROOT):
+        print(f"路径不存在: {PROJECT_ROOT}")
+    else:
+        analyzer = DependencyAnalyzer(PROJECT_ROOT, INCLUDE_PATHS)
+        analyzer.build_index()
+        analyzer.find_dependencies(TARGET_FUNCTION)
