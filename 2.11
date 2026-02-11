@@ -1,0 +1,146 @@
+import sys
+import os
+import clang.cindex
+from collections import defaultdict
+
+# ================= 配置区域 =================
+# 1. 设置 libclang 路径 (如果需要)
+# clang.cindex.Config.set_library_path(r"C:\Program Files\LLVM\bin")
+
+# 2. 项目根目录
+PROJECT_ROOT = r"./src"
+
+# 3. 目标函数名 (支持部分匹配，例如只写 "process")
+TARGET_FUNCTION_NAME = "process_data"
+
+# 4. 头文件路径 (必须正确，参考之前的步骤)
+INCLUDE_PATHS = [
+    r"./include",
+    # ... 把你之前配好的路径都加在这里
+]
+# ===========================================
+
+class USRDependencyAnalyzer:
+    def __init__(self, root_dir, include_paths):
+        self.root_dir = os.path.abspath(root_dir)
+        self.index = clang.cindex.Index.create()
+        
+        # 核心数据结构: USR -> 定义信息
+        self.usr_map = {} 
+        # 辅助映射: 简单函数名 -> [USR列表] (用于用户搜索)
+        self.name_to_usrs = defaultdict(list)
+        
+        self.compile_args = ['-std=c++17', '-xc++']
+        for path in include_paths:
+            self.compile_args.append(f'-I{os.path.abspath(path)}')
+
+    def build_index(self):
+        print(f"正在索引目录: {self.root_dir} ...")
+        count = 0
+        for root, dirs, files in os.walk(self.root_dir):
+            for file in files:
+                if file.endswith(('.cpp', '.c', '.cc', '.cxx')):
+                    full_path = os.path.join(root, file)
+                    self._index_file(full_path)
+                    count += 1
+        print(f"索引完成。扫描了 {count} 个文件，建立了 {len(self.usr_map)} 个函数定义的索引。")
+
+    def _index_file(self, file_path):
+        try:
+            # 完整解析，不能跳过函数体
+            tu = self.index.parse(file_path, args=self.compile_args)
+            self._recurse_definitions(tu.cursor, file_path)
+        except Exception as e:
+            print(f"解析失败 {file_path}: {e}")
+
+    def _recurse_definitions(self, cursor, file_path):
+        # 遍历 AST 寻找函数定义
+        for node in cursor.walk_preorder():
+            # 我们只关心在这个文件里写的定义 (Definition)，忽略引用 (Declaration)
+            if str(node.location.file) != file_path:
+                continue
+
+            if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+                if node.is_definition():
+                    # 获取 USR (唯一标识符)
+                    usr = node.get_usr()
+                    if usr:
+                        display_name = node.displayname # 包含参数的完整名字
+                        spelling = node.spelling        # 只有函数名
+                        
+                        # 存入索引
+                        self.usr_map[usr] = {
+                            'name': display_name,
+                            'file': file_path,
+                            'cursor': node
+                        }
+                        self.name_to_usrs[spelling].append(usr)
+
+    def find_dependencies(self, target_name):
+        print(f"\n正在查找函数: '{target_name}' ...")
+        
+        # 1. 确定入口 USR
+        start_usrs = []
+        
+        # 精确匹配
+        if target_name in self.name_to_usrs:
+            start_usrs = self.name_to_usrs[target_name]
+        else:
+            # 模糊匹配 (如果用户只输入了部分名字)
+            for name, usrs in self.name_to_usrs.items():
+                if target_name in name:
+                    start_usrs.extend(usrs)
+        
+        if not start_usrs:
+            print(f"错误: 在索引中未找到名为 '{target_name}' 的函数定义。")
+            print("提示: 可能是因为该函数定义在头文件中？或者 C++ 解析失败。")
+            print(f"当前索引了 {len(self.usr_map)} 个函数。前 5 个示例:")
+            for k in list(self.usr_map.keys())[:5]: print(f" - {self.usr_map[k]['name']}")
+            return
+
+        # 2. 如果找到多个匹配 (比如重载，或者不同类里的同名函数)，让用户选，或者全部分析
+        print(f"找到 {len(start_usrs)} 个匹配的入口点:")
+        for usr in start_usrs:
+            info = self.usr_map[usr]
+            print(f"  [+] {info['name']} (在 {os.path.basename(info['file'])})")
+            
+        print("\n开始递归分析依赖链...\n")
+        visited_usrs = set()
+        for usr in start_usrs:
+            self._analyze_recursive(usr, visited_usrs, depth=0)
+
+    def _analyze_recursive(self, current_usr, visited, depth):
+        if depth > 10: return
+        if current_usr in visited: return
+        visited.add(current_usr)
+
+        info = self.usr_map.get(current_usr)
+        if not info: return # 应该是第三方库函数，不在源码索引里
+
+        prefix = "  " * depth + "└── "
+        print(f"{prefix}{info['name']}  [{os.path.basename(info['file'])}]")
+
+        # 遍历函数体，寻找调用
+        cursor = info['cursor']
+        for child in cursor.walk_preorder():
+            if child.kind == clang.cindex.CursorKind.CALL_EXPR:
+                # 关键：获取被调用函数的 USR
+                referenced = child.referenced
+                if referenced:
+                    callee_usr = referenced.get_usr()
+                    
+                    # 只有当被调用的函数也在我们的源码里（即在 self.usr_map 中）才递归
+                    if callee_usr in self.usr_map:
+                        self._analyze_recursive(callee_usr, visited, depth + 1)
+                    else:
+                        # 可选：打印外部调用 (比如 std::vector)
+                        # print(f"{'  '*(depth+1)}[外部] {child.spelling}")
+                        pass
+
+if __name__ == "__main__":
+    if not os.path.exists(PROJECT_ROOT):
+        print("路径不存在")
+    else:
+        analyzer = USRDependencyAnalyzer(PROJECT_ROOT, INCLUDE_PATHS)
+        analyzer.build_index()
+        analyzer.find_dependencies(TARGET_FUNCTION_NAME)
