@@ -1,0 +1,134 @@
+import sys
+import os
+import clang.cindex
+
+# ================= 配置区域 =================
+# 1. 你的项目根目录
+PROJECT_ROOT = r"./src"  
+
+# 2. 目标函数名 (例如 "process_data")
+TARGET_FUNCTION = "process_data"
+
+# 3. 头文件路径 (请务必填对)
+INCLUDE_PATHS = [
+    r"./include",
+    # ... 其他路径
+]
+
+# 4. 是否扫描头文件 (如果你的代码逻辑写在 .h 里，必须设为 True)
+SCAN_HEADERS = True 
+# ===========================================
+
+class DebugAnalyzer:
+    def __init__(self, root, includes):
+        self.root = os.path.abspath(root)
+        self.index = clang.cindex.Index.create()
+        self.usr_map = {} # USR -> Node Info
+        self.name_map = {} # Name -> [USRs]
+        
+        self.args = ['-std=c++17', '-xc++']
+        for p in includes:
+            self.args.append(f'-I{os.path.abspath(p)}')
+
+    def build_index(self):
+        print("\n=== 第一步：建立索引 ===")
+        extensions = ('.cpp', '.c', '.cc', '.cxx')
+        if SCAN_HEADERS:
+            extensions += ('.h', '.hpp')
+
+        count = 0
+        for root, dirs, files in os.walk(self.root):
+            for file in files:
+                if file.endswith(extensions):
+                    self._index_file(os.path.join(root, file))
+                    count += 1
+        print(f"索引完成。扫描文件: {count}, 发现定义: {len(self.usr_map)}")
+
+    def _index_file(self, path):
+        try:
+            # 关键：ParseNone 可能会跳过函数体，这里确保完整解析
+            tu = self.index.parse(path, args=self.args)
+            self._find_defs(tu.cursor, path)
+        except Exception as e:
+            print(f"[错误] 解析文件失败 {path}: {e}")
+
+    def _find_defs(self, cursor, path):
+        for node in cursor.walk_preorder():
+            if str(node.location.file) != path: continue
+            
+            if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
+                             clang.cindex.CursorKind.CXX_METHOD,
+                             clang.cindex.CursorKind.CONSTRUCTOR]:
+                if node.is_definition():
+                    usr = node.get_usr()
+                    if usr:
+                        self.usr_map[usr] = {'name': node.spelling, 'cursor': node, 'file': path}
+                        if node.spelling not in self.name_map: self.name_map[node.spelling] = []
+                        self.name_map[node.spelling].append(usr)
+
+    def analyze(self, target_name):
+        print("\n=== 第二步：递归分析 ===")
+        
+        # 查找入口
+        candidates = []
+        for name, usrs in self.name_map.items():
+            if target_name in name:
+                candidates.extend(usrs)
+        
+        if not candidates:
+            print(f"[致命] 未找到函数 '{target_name}' 的任何定义。")
+            return
+
+        print(f"找到 {len(candidates)} 个潜在入口，开始分析...")
+        
+        visited = set()
+        for usr in candidates:
+            self._recurse_debug(usr, visited, 0)
+
+    def _recurse_debug(self, usr, visited, depth):
+        if depth > 5: return # 限制深度方便调试
+        if usr in visited: return
+        visited.add(usr)
+
+        info = self.usr_map.get(usr)
+        if not info: return 
+
+        indent = "  " * depth
+        node = info['cursor']
+        print(f"{indent}▶ 分析函数: {info['name']} (文件: {os.path.basename(info['file'])})")
+
+        # === 核心调试逻辑 ===
+        children = list(node.get_children())
+        if len(children) == 0:
+            print(f"{indent}  [警告] 该函数体是空的 (0 children)！")
+            print(f"{indent}  -> 原因可能是: 1. 这只是个声明不是定义 2. libclang解析出错(缺头文件) 3. 确实是空函数")
+            return
+
+        call_count = 0
+        for child in node.walk_preorder():
+            if child.kind == clang.cindex.CursorKind.CALL_EXPR:
+                call_count += 1
+                call_name = child.spelling
+                referenced = child.referenced
+                
+                # 检查引用是否有效
+                if referenced:
+                    ref_usr = referenced.get_usr()
+                    # 检查是否在我们的源码里
+                    if ref_usr in self.usr_map:
+                        print(f"{indent}  └── [调用] {call_name} (匹配成功，递归...)")
+                        self._recurse_debug(ref_usr, visited, depth + 1)
+                    else:
+                        # 虽然解析成功，但定义不在我们的源码目录里（比如是 std::vector 或 第三方库）
+                        print(f"{indent}  └── [忽略] {call_name} (定义在项目外/系统库)")
+                else:
+                    # 最常见的问题：libclang 没看懂这是个函数调用
+                    print(f"{indent}  └── [失败] {call_name} (无法解析引用 - 缺少头文件?)")
+        
+        if call_count == 0:
+             print(f"{indent}  [信息] 函数体内未发现任何函数调用 (AST遍历完成)")
+
+if __name__ == "__main__":
+    analyzer = DebugAnalyzer(PROJECT_ROOT, INCLUDE_PATHS)
+    analyzer.build_index()
+    analyzer.analyze(TARGET_FUNCTION)
