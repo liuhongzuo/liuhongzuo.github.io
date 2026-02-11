@@ -1,0 +1,162 @@
+import os
+import re
+import sys
+
+# ================= 配置区域 =================
+# 1. 项目根目录
+PROJECT_ROOT = r"./src" 
+
+# 2. 入口函数名 (纯名字，不要带括号)
+#    注意：如果有 MyClass::process，你可以搜 "process" 或 "MyClass::process"
+TARGET_FUNCTION = "process_data"
+
+# 3. 要扫描的文件后缀
+EXTENSIONS = ('.cpp', '.c', '.cc', '.cxx', '.h', '.hpp')
+# ===========================================
+
+class RegexDependencyAnalyzer:
+    def __init__(self, root_dir):
+        self.root_dir = os.path.abspath(root_dir)
+        # 存储定义: { 'func_name': [ {'file': path, 'body': code_content}, ... ] }
+        # 使用列表是因为可能存在同名函数（重载或不同类）
+        self.definitions = {}
+        
+    def run(self, target_func):
+        print(f"正在扫描目录: {self.root_dir} ...")
+        self._scan_all_files()
+        print(f"扫描完成。找到 {sum(len(v) for v in self.definitions.values())} 个函数定义。")
+        
+        print(f"\n开始分析依赖链: {target_func}")
+        visited = set()
+        self._find_recursive(target_func, visited, depth=0)
+
+    def _scan_all_files(self):
+        """遍历所有文件并提取函数定义"""
+        for root, dirs, files in os.walk(self.root_dir):
+            for file in files:
+                if file.endswith(EXTENSIONS):
+                    full_path = os.path.join(root, file)
+                    try:
+                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            # 1. 移除注释 (关键步骤，防止匹配到注释里的代码)
+                            content = self._remove_comments(content)
+                            # 2. 提取函数定义
+                            self._extract_definitions(content, full_path)
+                    except Exception as e:
+                        print(f"读取文件失败 {full_path}: {e}")
+
+    def _remove_comments(self, text):
+        """移除 C/C++ 风格的注释"""
+        def replacer(match):
+            s = match.group(0)
+            if s.startswith('/'):
+                return " " # 用空格替换注释
+            else:
+                return s
+        # 正则：匹配 /*...*/ 或 //... 或 字符串
+        pattern = re.compile(
+            r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
+            re.DOTALL | re.MULTILINE
+        )
+        return re.sub(pattern, replacer, text)
+
+    def _extract_definitions(self, content, file_path):
+        """
+        核心逻辑：
+        1. 找到类似 `void MyClass::Func(int a) {` 的头。
+        2. 通过花括号计数找到函数结束的位置。
+        """
+        # 这个正则匹配：
+        # (可能带命名空间/类名的函数名) \s* (参数列表) \s* (可能有的const/override) \s* {
+        # Group 1: 函数名 (e.g. "MyClass::Process", "main", "foo")
+        func_head_pattern = re.compile(
+            r'((?:\w+::)*\w+)\s*\([^)]*\)\s*(?:const|noexcept|override|final|static|inline|\s)*\{'
+        )
+
+        # 这里的逻辑是：遍历所有匹配到的“函数头”，然后往后找配对的 '}'
+        for match in func_head_pattern.finditer(content):
+            func_name = match.group(1)
+            start_index = match.end() - 1 # '{' 的位置
+            
+            # 提取完整函数体 (包括花括号)
+            body = self._extract_balanced_body(content, start_index)
+            
+            if body:
+                # 存入索引
+                if func_name not in self.definitions:
+                    self.definitions[func_name] = []
+                
+                # 同时存入“短名字”以支持模糊匹配
+                # 比如定义是 "A::foo"，存入 "foo" 也能搜到，防止漏掉
+                short_name = func_name.split('::')[-1]
+                if short_name != func_name:
+                    if short_name not in self.definitions:
+                        self.definitions[short_name] = []
+                    self.definitions[short_name].append({'file': file_path, 'body': body, 'full_name': func_name})
+
+                self.definitions[func_name].append({'file': file_path, 'body': body, 'full_name': func_name})
+
+    def _extract_balanced_body(self, text, start_index):
+        """从 start_index 的 '{' 开始，找到匹配的 '}'"""
+        balance = 0
+        for i in range(start_index, len(text)):
+            char = text[i]
+            if char == '{':
+                balance += 1
+            elif char == '}':
+                balance -= 1
+                if balance == 0:
+                    return text[start_index:i+1] # 返回函数体
+        return None
+
+    def _find_recursive(self, current_func_name, visited, depth):
+        if depth > 15: # 防止过深
+            print("  " * depth + "...")
+            return
+        
+        # 避免循环引用
+        if current_func_name in visited:
+            return
+        visited.add(current_func_name)
+
+        # 获取该函数的所有定义（可能有重载，或者同名函数）
+        defs = self.definitions.get(current_func_name)
+        
+        if not defs:
+            # 尝试模糊查找? (可选)
+            # print("  " * depth + f"[未找到定义] {current_func_name}")
+            return
+
+        # 打印当前节点
+        files = list(set([os.path.basename(d['file']) for d in defs]))
+        print("  " * depth + f"└── {current_func_name} ({', '.join(files)})")
+
+        # 对每一个定义的内容进行扫描，看它调用了谁
+        # 这一步可能会有重复，比如 A::foo 和 B::foo 内容不同，但我们这里合并处理了
+        merged_callees = set()
+        
+        for d in defs:
+            body = d['body']
+            # 在 body 里搜索所有已知的函数名
+            # 使用正则 \bName\b 确保全词匹配
+            for known_func in self.definitions.keys():
+                # 优化：跳过自己，跳过太短的名字
+                if known_func == current_func_name or len(known_func) < 2:
+                    continue
+                
+                # 如果这个 known_func 出现在了 body 里
+                # 注意：这里简单的字符串查找，可能会匹配到局部变量名，但因为我们是拿着“已知函数列表”去搜，
+                # 所以只有当局部变量名刚好和某个函数名一样时才会误报。
+                if re.search(r'\b' + re.escape(known_func) + r'\b', body):
+                    merged_callees.add(known_func)
+
+        # 递归下一层
+        for callee in sorted(merged_callees):
+            # 简单的过滤：如果不包含 '::' 且有包含 '::' 的版本存在，优先用长的？
+            # 这里简单起见，直接递归
+            self._find_recursive(callee, visited, depth + 1)
+
+if __name__ == "__main__":
+    analyzer = RegexDependencyAnalyzer(PROJECT_ROOT)
+    analyzer.run(TARGET_FUNCTION)
