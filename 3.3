@@ -1,0 +1,92 @@
+import onnx
+from onnx import helper, TensorProto
+import os
+
+def create_ep_context_model(
+    binary_path: str,
+    output_onnx_path: str,
+    ep_domain: str = "com.microsoft"
+):
+    """
+    将预编译的二进制文件打包成包含 EPContext 节点的 ONNX 模型。
+    """
+    
+    # 1. 读取预编译的二进制文件数据
+    if not os.path.exists(binary_path):
+        raise FileNotFoundError(f"找不到二进制文件: {binary_path}")
+        
+    with open(binary_path, "rb") as f:
+        binary_data = f.read()
+
+    # 2. 定义模型的输入和输出 (非常重要：必须与你二进制文件的期望严格一致)
+    # 这里以一个输入 [1, 3, 224, 224] Float32 和一个输出 [1, 1000] Float32 为例
+    # 在实际工具中，这些参数应该通过解析原模型或由用户配置传入
+    input_tensor = helper.make_tensor_value_info(
+        'input', TensorProto.FLOAT, [1, 3, 224, 224]
+    )
+    output_tensor = helper.make_tensor_value_info(
+        'output', TensorProto.FLOAT, [1, 1000]
+    )
+
+    # 3. 创建 EPContext 节点
+    # 不同的 Execution Provider (如 QNN EP) 可能对属性名有细微不同的要求
+    # 通用的通常是将 payload 放入 `ep_cache_context` 或 `ep_context_data` 属性中
+    node = helper.make_node(
+        op_type='EPContext',
+        inputs=['input'],      # 对应上面的 input_tensor 名字
+        outputs=['output'],    # 对应上面的 output_tensor 名字
+        name='EPContext_Node_0',
+        domain=ep_domain,
+        # 添加具体的属性，以下属性名需根据你目标 EP 的具体要求进行调整
+        partition_name='partition_0',
+        source='MyCustomCompiler',
+        ep_cache_context=binary_data # 将二进制数据直接作为字符串属性注入
+    )
+
+    # 4. 创建 Graph
+    graph = helper.make_graph(
+        nodes=[node],
+        name='EPContext_Graph',
+        inputs=[input_tensor],
+        outputs=[output_tensor]
+    )
+
+    # 5. 创建 Model 并指定 Opset Imports
+    # 标准的 ONNX opset
+    onnx_opset = onnx.OperatorSetIdProto()
+    onnx_opset.domain = ""
+    onnx_opset.version = 14  # 视你的基准而定
+
+    # 引入 com.microsoft 域，这对于解析 EPContext 至关重要
+    ms_opset = onnx.OperatorSetIdProto()
+    ms_opset.domain = ep_domain
+    ms_opset.version = 1
+
+    model = helper.make_model(
+        graph, 
+        producer_name='EPContext_Wrapper_Tool',
+        opset_imports=[onnx_opset, ms_opset]
+    )
+
+    # 6. 保存模型 (强烈建议将二进制保存为外部数据，防止 .onnx 文件过大崩溃)
+    external_data_file = os.path.basename(output_onnx_path) + ".data"
+    
+    onnx.save_model(
+        model,
+        output_onnx_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=external_data_file,
+        size_threshold=1024 # 超过 1KB 的数据就写到外部文件中
+    )
+    
+    print(f"✅ 成功生成 EPContext 模型: {output_onnx_path}")
+    print(f"📦 绑定的外部数据文件: {external_data_file}")
+
+# 运行测试
+if __name__ == "__main__":
+    # 模拟一个 dummy 编译后的 binary
+    with open("dummy_compiled.bin", "wb") as f:
+        f.write(b"MOCK_COMPILED_HARDWARE_CODE_01010101")
+        
+    create_ep_context_model("dummy_compiled.bin", "wrapped_model.onnx")
