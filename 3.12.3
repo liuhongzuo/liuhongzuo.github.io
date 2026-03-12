@@ -1,0 +1,21 @@
+import torch
+import torch.nn as nn
+
+class AddModel(nn.Module):
+    def forward(self, a, b):
+        return a + b
+
+model = AddModel()
+# Define dummy inputs with shape 1x2x3x3 and dtype float16
+dummy_a = torch.randn(1, 2, 3, 3, dtype=torch.float16)
+dummy_b = torch.randn(1, 2, 3, 3, dtype=torch.float16)
+
+# Export to ONNX
+torch.onnx.export(
+    model, 
+    (dummy_a, dummy_b), 
+    "add_fp16.onnx", 
+    input_names=["input_A", "input_B"], 
+    output_names=["output_C"]
+)
+print("add_fp16.onnx generated successfully.")
