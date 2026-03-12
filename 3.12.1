@@ -1,0 +1,131 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cstring>
+#include <onnxruntime_cxx_api.h>
+
+// Helper function to convert IEEE 754 Float16 (uint16_t) to Float32 (float)
+// This is used purely to print and verify the output data.
+float halfToFloat(uint16_t h) {
+    uint32_t sign = (h >> 15) & 0x00000001;
+    uint32_t exp  = (h >> 10) & 0x0000001F;
+    uint32_t frac =  h        & 0x000003FF;
+
+    if (exp == 0) {
+        if (frac == 0) return sign ? -0.0f : 0.0f;
+    }
+    
+    exp = exp + (127 - 15);
+    frac = frac << 13;
+    uint32_t bits = (sign << 31) | (exp << 23) | frac;
+    
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+int main() {
+    // 1. Initialize ONNX Runtime environment
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "DynamicParseInference");
+
+    // 2. Initialize Session options
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(1);
+    session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // 3. Load the ONNX model 
+    const char* model_path = "add_fp16.onnx"; 
+    Ort::Session session(env, model_path, session_options);
+
+    // 4. Dynamically parse Input and Output names
+    // We use a default allocator to extract strings from the ONNX session
+    Ort::AllocatorWithDefaultOptions allocator;
+
+    // --- Parse Inputs ---
+    size_t num_input_nodes = session.GetInputCount();
+    std::vector<std::string> input_node_names_str;    // Owns the string memory
+    std::vector<const char*> input_node_names_cstr;   // Used for session.Run()
+
+    std::cout << "--- Model Inputs ---" << std::endl;
+    for (size_t i = 0; i < num_input_nodes; i++) {
+        // GetInputNameAllocated returns a smart pointer that manages the string memory
+        Ort::AllocatedStringPtr input_name_ptr = session.GetInputNameAllocated(i, allocator);
+        input_node_names_str.push_back(input_name_ptr.get());
+        input_node_names_cstr.push_back(input_node_names_str.back().c_str());
+        std::cout << "Input [" << i << "]: " << input_node_names_str.back() << std::endl;
+    }
+
+    // --- Parse Outputs ---
+    size_t num_output_nodes = session.GetOutputCount();
+    std::vector<std::string> output_node_names_str;   // Owns the string memory
+    std::vector<const char*> output_node_names_cstr;  // Used for session.Run()
+
+    std::cout << "--- Model Outputs ---" << std::endl;
+    for (size_t i = 0; i < num_output_nodes; i++) {
+        Ort::AllocatedStringPtr output_name_ptr = session.GetOutputNameAllocated(i, allocator);
+        output_node_names_str.push_back(output_name_ptr.get());
+        output_node_names_cstr.push_back(output_node_names_str.back().c_str());
+        std::cout << "Output [" << i << "]: " << output_node_names_str.back() << std::endl;
+    }
+    std::cout << "--------------------" << std::endl;
+
+    // 5. Define shape and size for 1 * 2 * 3 * 3
+    std::vector<int64_t> tensor_shape = {1, 2, 3, 3};
+    size_t tensor_element_count = 1 * 2 * 3 * 3; // 18 elements
+
+    // 6. Generate dummy data for two Float16 inputs
+    std::vector<Ort::Float16_t> input_data_A(tensor_element_count);
+    std::vector<Ort::Float16_t> input_data_B(tensor_element_count);
+
+    // Fill the arrays with dummy Float16 values (1.0 and 2.0)
+    for (size_t i = 0; i < tensor_element_count; ++i) {
+        input_data_A[i].val = 0x3C00; // Represents 1.0
+        input_data_B[i].val = 0x4000; // Represents 2.0
+    }
+
+    // 7. Create Memory Info and Tensors
+    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+    std::vector<Ort::Value> input_tensors;
+    input_tensors.push_back(Ort::Value::CreateTensor<Ort::Float16_t>(
+        memory_info, 
+        input_data_A.data(), 
+        input_data_A.size(), 
+        tensor_shape.data(), 
+        tensor_shape.size()
+    ));
+
+    input_tensors.push_back(Ort::Value::CreateTensor<Ort::Float16_t>(
+        memory_info, 
+        input_data_B.data(), 
+        input_data_B.size(), 
+        tensor_shape.data(), 
+        tensor_shape.size()
+    ));
+
+    // 8. Execute inference using the dynamically parsed names
+    std::vector<Ort::Value> output_tensors = session.Run(
+        Ort::RunOptions{nullptr}, 
+        input_node_names_cstr.data(), 
+        input_tensors.data(), 
+        num_input_nodes, 
+        output_node_names_cstr.data(), 
+        num_output_nodes
+    );
+
+    // 9. Retrieve and verify the output data
+    Ort::Float16_t* output_arr = output_tensors.front().GetTensorMutableData<Ort::Float16_t>();
+    auto type_info = output_tensors.front().GetTensorTypeAndShapeInfo();
+    size_t output_element_count = type_info.GetElementCount();
+
+    std::cout << "Inference successful!" << std::endl;
+    std::cout << "Output tensor element count: " << output_element_count << std::endl;
+    std::cout << "Result verification (Expected: 1.0 + 2.0 = 3.0):" << std::endl;
+
+    for (size_t i = 0; i < output_element_count; ++i) {
+        float result = halfToFloat(output_arr[i].val);
+        std::cout << "Element [" << i << "] = " << result << std::endl;
+    }
+
+    return 0;
+}
