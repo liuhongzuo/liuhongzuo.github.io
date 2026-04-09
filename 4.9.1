@@ -1,0 +1,110 @@
+import json
+import onnx
+from onnx import helper, TensorProto
+import numpy as np
+
+# 数据类型映射表
+TYPE_MAP = {
+    "FLOAT": TensorProto.FLOAT,
+    "INT32": TensorProto.INT32,
+    "INT64": TensorProto.INT64,
+    "DOUBLE": TensorProto.DOUBLE
+}
+
+def build_onnx_from_json(json_data, output_path="model.onnx"):
+    # 1. 解析全局输入 (Graph Inputs)
+    inputs = []
+    for inp in json_data['graph_inputs']:
+        inputs.append(
+            helper.make_tensor_value_info(
+                inp['name'], 
+                TYPE_MAP[inp['data_type']], 
+                inp['shape']
+            )
+        )
+
+    # 2. 解析全局输出 (Graph Outputs)
+    outputs = []
+    for out in json_data['graph_outputs']:
+        outputs.append(
+            helper.make_tensor_value_info(
+                out['name'], 
+                TYPE_MAP[out['data_type']], 
+                out['shape']
+            )
+        )
+
+    # 3. 创建节点 (Nodes)
+    nodes = []
+    for n in json_data['nodes']:
+        # 处理属性 (Attributes)
+        # 注意：ONNX 要求属性必须明确类型（如 ints, floats, string 等）
+        attrs = n.get('attributes', {})
+        
+        # 简单的自动转换逻辑：如果是列表且元素是 int，转为 ints 属性
+        formatted_attrs = {}
+        for k, v in attrs.items():
+            formatted_attrs[k] = v
+
+        node_def = helper.make_node(
+            op_type=n['op_type'],
+            inputs=n['inputs'],
+            outputs=n['outputs'],
+            name=n.get('name'),
+            **formatted_attrs
+        )
+        nodes.append(node_def)
+
+    # 4. 组装图 (Graph)
+    graph_def = helper.make_graph(
+        nodes,
+        json_data['graph_name'],
+        inputs,
+        outputs,
+        # 如果有权重可以在这里添加 initializer
+    )
+
+    # 5. 组装模型 (Model)
+    # 指定 opset 版本，13 及以上版本对 Split 等算子支持较好
+    model_def = helper.make_model(graph_def, producer_name='onnx-json-builder')
+    model_def.opset_import[0].version = 13
+
+    # 6. 验证并保存
+    try:
+        onnx.checker.check_model(model_def)
+        onnx.save(model_def, output_path)
+        print(f"成功生成模型: {output_path}")
+    except Exception as e:
+        print(f"模型检查失败: {e}")
+
+# --- 测试运行 ---
+config_json = {
+  "graph_name": "Multi_Output_Routing_Example",
+  "graph_inputs": [
+    {"name": "input_x", "data_type": "FLOAT", "shape": [1, 10]}
+  ],
+  "graph_outputs": [
+    {"name": "a", "data_type": "FLOAT", "shape": [1, 5]}, 
+    {"name": "c", "data_type": "FLOAT", "shape": [1, 5]}  
+  ],
+  "nodes": [
+    {
+      "name": "Node_1",
+      "op_type": "Split", 
+      "inputs": ["input_x"],
+      "outputs": ["a", "b"], 
+      "attributes": {
+        "axis": 1,
+        "split": [5, 5]
+      }
+    },
+    {
+      "name": "Node_2",
+      "op_type": "Relu",
+      "inputs": ["b"], 
+      "outputs": ["c"]
+    }
+  ]
+}
+
+build_onnx_from_json(config_json, "routing_model.onnx")
