@@ -1,0 +1,30 @@
+{
+  "graph_name": "Stateful_Accumulator",
+  "graph_inputs": [
+    {"name": "data_in", "data_type": "FLOAT", "shape": [1, 5]},
+    {"name": "state_in", "data_type": "FLOAT", "shape": [1, 5]} 
+  ],
+  "graph_outputs": [
+    {"name": "result_out", "data_type": "FLOAT", "shape": [1, 5]},
+    {"name": "state_out", "data_type": "FLOAT", "shape": [1, 5]} 
+  ],
+  "initializers": [
+    {"name": "multiplier", "data_type": "FLOAT", "shape": [1], "values": [2.0]}
+  ],
+  "nodes": [
+    {
+      "name": "node_add_state",
+      "op_type": "Add",
+      "inputs": ["data_in", "state_in"],
+      "outputs": ["state_out"],
+      "doc_string": "计算新的状态，既作为全局输出供下次使用，也作为下一个节点的输入"
+    },
+    {
+      "name": "node_mul_result",
+      "op_type": "Mul",
+      "inputs": ["state_out", "multiplier"],
+      "outputs": ["result_out"],
+      "doc_string": "计算最终结果"
+    }
+  ]
+}
