@@ -1,0 +1,66 @@
+import json
+import onnx
+from onnx import helper, TensorProto
+
+TYPE_MAP = {
+    "FLOAT": TensorProto.FLOAT,
+    "INT32": TensorProto.INT32,
+    "INT64": TensorProto.INT64
+}
+
+def build_onnx_with_explicit_shapes(json_data, output_path="explicit_model.onnx"):
+    # 1. 处理全局输入
+    inputs = [
+        helper.make_tensor_value_info(i['name'], TYPE_MAP[i['data_type']], i['shape']) 
+        for i in json_data['graph_inputs']
+    ]
+
+    # 2. 处理全局输出
+    outputs = [
+        helper.make_tensor_value_info(o['name'], TYPE_MAP[o['data_type']], o['shape']) 
+        for o in json_data['graph_outputs']
+    ]
+
+    # 3. 【关键修改】处理中间变量的形状信息
+    # ValueInfo 用于描述图中流动的中间张量
+    intermediate_values = []
+    for v in json_data.get('value_info', []):
+        vi = helper.make_tensor_value_info(
+            v['name'], 
+            TYPE_MAP[v['data_type']], 
+            v['shape']
+        )
+        intermediate_values.append(vi)
+
+    # 4. 构造节点
+    nodes = []
+    for n in json_data['nodes']:
+        node_def = helper.make_node(
+            op_type=n['op_type'],
+            inputs=n['inputs'],
+            outputs=n['outputs'],
+            name=n.get('name'),
+            **n.get('attributes', {})
+        )
+        nodes.append(node_def)
+
+    # 5. 组装 Graph，传入 value_info 参数
+    graph_def = helper.make_graph(
+        nodes,
+        json_data['graph_name'],
+        inputs,
+        outputs,
+        initializer=[],     # 如果有权重放这里
+        value_info=intermediate_values  # <--- 显式指定中间形状
+    )
+
+    # 6. 保存模型
+    model_def = helper.make_model(graph_def, producer_name='onnx-shape-builder')
+    model_def.opset_import[0].version = 13
+    
+    onnx.checker.check_model(model_def)
+    onnx.save(model_def, output_path)
+    print(f"模型已生成，中间变量形状已固定: {output_path}")
+
+# 调用执行
+# build_onnx_with_explicit_shapes(your_json_dict)
